@@ -12,7 +12,7 @@
 
 - 🎨 **現代化懸浮 UI (Floating Widget)**
   - 極簡無邊框設計、支援半透明度控制與自由置頂 (AlwaysOnTop) 切換。
-  - 彩色 Unicode Emoji (Segoe UI Emoji) 圖示，直覺好看。
+  - 豐富 Unicode Emoji 圖示標籤與清晰動作提示，直覺好看。
   - 右鍵快捷選單支援，方便隨時開啟編輯器、匯入/匯出設定或安全退出。
 
 - 📊 **雙層 GDI 實體動態進度條 (GDI Progress Bar)**
