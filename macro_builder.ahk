@@ -394,16 +394,19 @@ ToggleMacroEditGui() {
     
     ; 動作按鈕列
     actY := lvY + 223
-    btnAddColor := MacroEditGui.Add("Button", "x15 y" actY " w160 h35 Background0x282828", "🎯 圈選顏色與動作")
+    btnAddColor := MacroEditGui.Add("Button", "x15 y" actY " w125 h35 Background0x282828", "🎯 圈選顏色")
     btnAddColor.OnEvent("Click", (*) => PromptAddColorDetect())
     
-    btnAddWait := MacroEditGui.Add("Button", "x185 y" actY " w160 h35 Background0x282828", "⏱ +等待秒數")
+    btnAddWait := MacroEditGui.Add("Button", "x145 y" actY " w105 h35 Background0x282828", "⏱ +等待")
     btnAddWait.OnEvent("Click", (*) => PromptAddWait())
     
-    btnEditStep := MacroEditGui.Add("Button", "x355 y" actY " w70 h35 Background0x006699", "✏ 編輯")
+    btnAddLoopGoto := MacroEditGui.Add("Button", "x255 y" actY " w105 h35 Background0x282828", "🔁 +步驟循環")
+    btnAddLoopGoto.OnEvent("Click", (*) => PromptAddLoopGoto())
+    
+    btnEditStep := MacroEditGui.Add("Button", "x365 y" actY " w65 h35 Background0x006699", "✏ 編輯")
     btnEditStep.OnEvent("Click", (*) => EditSelectedStep())
     
-    btnDelStep := MacroEditGui.Add("Button", "x430 y" actY " w65 h35 Background0x882222", "🗑 刪除")
+    btnDelStep := MacroEditGui.Add("Button", "x435 y" actY " w60 h35 Background0x882222", "🗑 刪除")
     btnDelStep.OnEvent("Click", (*) => DeleteSelectedStep())
     
     btnUp := MacroEditGui.Add("Button", "x505 y" actY " w40 h35", "▲")
@@ -628,8 +631,11 @@ RefreshMacroListView() {
             MacroLV.Add("", idx, actTitle, "區域: (" step.x "," step.y " W:" step.w " H:" step.h ")", paramText)
         } else if (step.type == "wait") {
             MacroLV.Add("", idx, "⏱ 等待秒數", "純等待延遲", (step.waitMs/1000) " 秒")
+        } else if (step.type == "loop_goto") {
+            targetS := step.HasOwnProp("targetStep") ? step.targetStep : 1
+            maxL := step.HasOwnProp("maxLoops") ? step.maxLoops : 1
+            MacroLV.Add("", idx, "🔁 步驟循環控制", Format("返回第 {} 步", targetS), Format("循環 {} 次後繼續下一步", maxL))
         }
-    }
 }
 
 DeleteSelectedStep() {
@@ -677,6 +683,8 @@ EditSelectedStep() {
             PromptEditColorDetect(step)
         } else if (step.type == "wait") {
             PromptEditWait(step)
+        } else if (step.type == "loop_goto") {
+            PromptEditLoopGoto(step)
         }
     } else {
         MsgBox("請先點選欲編輯的巨集步驟項！", "提示", "262192")
@@ -1223,7 +1231,76 @@ PromptEditWait(step) {
     ))
     dlg.OnEvent("Close", (*) => CloseWaitDlg())
     
-    dlg.Show("w300 h145")
+; =================================================================
+; [動作 3：步驟內循環轉向控制 (Loop Goto Step)]
+; =================================================================
+PromptAddLoopGoto() {
+    global MacroGroups, ActiveEditGroupIdx
+    if (ActiveEditGroupIdx < 1 || ActiveEditGroupIdx > MacroGroups.Length)
+        return
+        
+    PromptEditLoopGoto({ type: "loop_goto", targetStep: 1, maxLoops: 5, isNew: true })
+}
+
+PromptEditLoopGoto(step) {
+    global MacroGroups, ActiveEditGroupIdx, ActiveStepEditDlg, IsAlwaysOnTop
+    isNew := step.HasOwnProp("isNew") && step.isNew
+    
+    if (ActiveStepEditDlg != "") {
+        try {
+            if WinExist("ahk_id " . ActiveStepEditDlg.Hwnd) {
+                WinActivate("ahk_id " . ActiveStepEditDlg.Hwnd)
+                return
+            }
+        }
+        ActiveStepEditDlg := ""
+    }
+    
+    ownerHwnd := GetMacroEditGuiHwnd()
+    ownerOpt := (ownerHwnd > 0) ? (" +Owner" . ownerHwnd) : ""
+    
+    dlg := Gui("-MaximizeBox" . ownerOpt . " +AlwaysOnTop", isNew ? "🔁 增加步驟循環轉向動作" : "🔁 編輯步驟循環轉向動作")
+    dlg.BackColor := "0x1A1A1A"
+    dlg.SetFont("s10 bold cWhite", "Microsoft JhengHei")
+    ActiveStepEditDlg := dlg
+    
+    maxSteps := (ActiveEditGroupIdx <= MacroGroups.Length) ? Max(1, MacroGroups[ActiveEditGroupIdx].steps.Length) : 1
+    curTarget := step.HasOwnProp("targetStep") ? Min(maxSteps, Max(1, step.targetStep)) : 1
+    curLoops := step.HasOwnProp("maxLoops") ? Max(1, step.maxLoops) : 5
+    
+    dlg.Add("Text", "x20 y18 w140 h25 cWhite", "返回目標步驟號:")
+    lblTarget := dlg.Add("Text", "x160 y18 w140 h25 c0x00FFFF", "第 " curTarget " 步")
+    sldTarget := dlg.Add("Slider", "x20 y45 w280 h30 Range1-" maxSteps " +AltSubmit ToolTip", curTarget)
+    sldTarget.OnEvent("Change", (ctrl, *) => (
+        lblTarget.Value := "第 " ctrl.Value " 步"
+    ))
+    
+    dlg.Add("Text", "x20 y85 w140 h25 cWhite", "重複返回循環次數:")
+    lblLoops := dlg.Add("Text", "x160 y85 w140 h25 c0x00FFFF", curLoops " 次")
+    sldLoops := dlg.Add("Slider", "x20 y112 w280 h30 Range1-999 +AltSubmit ToolTip", curLoops)
+    sldLoops.OnEvent("Change", (ctrl, *) => (
+        lblLoops.Value := ctrl.Value " 次"
+    ))
+    
+    dlg.Add("Text", "x20 y150 w280 h38 c0x888888", "說明: 執行到此步驟時會跳轉回指定步驟，累積指定次數後即會自動通過推進至下一步。")
+    
+    CloseLoopGotoDlg() {
+        global ActiveStepEditDlg
+        ActiveStepEditDlg := ""
+        try dlg.Destroy()
+    }
+    
+    btnConfirm := dlg.Add("Button", "x20 y195 w280 h38 Background0x008800", isNew ? "確認新增步驟循環" : "確認儲存循環修改")
+    btnConfirm.OnEvent("Click", (*) => (
+        step.targetStep := Integer(sldTarget.Value),
+        step.maxLoops := Integer(sldLoops.Value),
+        isNew ? MacroGroups[ActiveEditGroupIdx].steps.Push(step) : 0,
+        RefreshMacroListView(),
+        CloseLoopGotoDlg()
+    ))
+    dlg.OnEvent("Close", (*) => CloseLoopGotoDlg())
+    
+    dlg.Show("w320 h248")
 }
 
 SaveMacroConfig(targetPath := "") {
@@ -1267,6 +1344,9 @@ SaveMacroConfig(targetPath := "") {
                 IniWrite(step.HasOwnProp("jumpStep") ? step.jumpStep : 1, saveFile, sSec, "JumpStep")
             } else if (step.type == "wait") {
                 IniWrite(step.waitMs, saveFile, sSec, "WaitMs")
+            } else if (step.type == "loop_goto") {
+                IniWrite(step.HasOwnProp("targetStep") ? step.targetStep : 1, saveFile, sSec, "TargetStep")
+                IniWrite(step.HasOwnProp("maxLoops") ? step.maxLoops : 1, saveFile, sSec, "MaxLoops")
             }
         }
     }
@@ -1324,6 +1404,12 @@ LoadMacroConfig(targetPath := "") {
                     steps.Push({
                         type: "wait",
                         waitMs: Integer(IniRead(loadFile, sSec, "WaitMs", "1000"))
+                    })
+                } else if (sType == "loop_goto") {
+                    steps.Push({
+                        type: "loop_goto",
+                        targetStep: Integer(IniRead(loadFile, sSec, "TargetStep", "1")),
+                        maxLoops: Integer(IniRead(loadFile, sSec, "MaxLoops", "5"))
                     })
                 }
             }
@@ -1449,6 +1535,7 @@ RunGroupMacroLoop(groupIdx) {
     curLoop := 1
     totalLoops := grp.loopCount
     steps := grp.steps
+    loopCounters := Map()
     
     while (curLoop <= totalLoops && !StopMacroRequested && RunningGroupIdx == groupIdx) {
         sIdx := 1
@@ -1581,6 +1668,23 @@ RunGroupMacroLoop(groupIdx) {
                 statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 等待 {:.1f}s...", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, step.waitMs/1000)
                 RenderProgressBarBitmap(stepPct, totalPct, statusText)
                 SleepInterruptible(step.waitMs)
+            } else if (step.type == "loop_goto") {
+                targetS := step.HasOwnProp("targetStep") ? Max(1, Min(steps.Length, step.targetStep)) : 1
+                maxL := step.HasOwnProp("maxLoops") ? Max(1, step.maxLoops) : 1
+                
+                currRunCount := loopCounters.Has(sIdx) ? loopCounters[sIdx] : 0
+                if (currRunCount < maxL) {
+                    loopCounters[sIdx] := currRunCount + 1
+                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 🔁 轉向跳轉至第 {} 步 ({}/{})", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, targetS, currRunCount + 1, maxL)
+                    RenderProgressBarBitmap(stepPct, totalPct, statusText)
+                    Sleep(150)
+                    sIdx := targetS - 1 ; 跳轉至目標步驟 (迴圈末會 sIdx++)
+                } else {
+                    loopCounters[sIdx] := 0 ; 滿次解鎖並重置計數器，推進至下一步
+                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 🔁 轉向次數已滿 ({}/{})，推進下一步", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, maxL, maxL)
+                    RenderProgressBarBitmap(stepPct, totalPct, statusText)
+                    Sleep(150)
+                }
             }
             sIdx++
         }
