@@ -636,6 +636,7 @@ RefreshMacroListView() {
             maxL := step.HasOwnProp("maxLoops") ? step.maxLoops : 1
             MacroLV.Add("", idx, "🔁 步驟循環控制", Format("返回第 {} 步", targetS), Format("循環 {} 次後繼續下一步", maxL))
         }
+    }
 }
 
 DeleteSelectedStep() {
