@@ -201,13 +201,104 @@ TimeStepToMs(stepIdx, tbl := "") {
     return targetTbl[stepIdx]
 }
 
+; Cursor IDs for borderless resizing and moving
+global hCursorMove := DllCall("LoadCursor", "Ptr", 0, "Int", 32646, "Ptr")
+global hCursorNWSE := DllCall("LoadCursor", "Ptr", 0, "Int", 32642, "Ptr")
+global hCursorNESW := DllCall("LoadCursor", "Ptr", 0, "Int", 32643, "Ptr")
+global hCursorWE := DllCall("LoadCursor", "Ptr", 0, "Int", 32644, "Ptr")
+global hCursorNS := DllCall("LoadCursor", "Ptr", 0, "Int", 32645, "Ptr")
+
+GetBoxHitMode(hwnd, px, py, &wx, &wy, &ww, &wh) {
+    WinGetPos(&wx, &wy, &ww, &wh, "ahk_id " . hwnd)
+    b := 12
+    isLeft := (px >= wx && px < wx + b)
+    isRight := (px >= wx + ww - b && px <= wx + ww)
+    isTop := (py >= wy && py < wy + b)
+    isBottom := (py >= wy + wh - b && py <= wy + wh)
+    
+    if (isTop && isLeft)
+        return "NW"
+    if (isTop && isRight)
+        return "NE"
+    if (isBottom && isLeft)
+        return "SW"
+    if (isBottom && isRight)
+        return "SE"
+    if (isTop)
+        return "N"
+    if (isBottom)
+        return "S"
+    if (isLeft)
+        return "W"
+    if (isRight)
+        return "E"
+    return "MOVE"
+}
+
+OnWM_SETCURSOR(wParam, lParam, msg, hwnd) {
+    global ActiveBoxGuiHwnd, hCursorMove, hCursorNWSE, hCursorNESW, hCursorWE, hCursorNS
+    if (ActiveBoxGuiHwnd != 0 && wParam == ActiveBoxGuiHwnd) {
+        CoordMode("Mouse", "Screen")
+        MouseGetPos(&mx, &my)
+        mode := GetBoxHitMode(ActiveBoxGuiHwnd, mx, my, &wx, &wy, &ww, &wh)
+        hCur := hCursorMove
+        if (mode == "NW" || mode == "SE")
+            hCur := hCursorNWSE
+        else if (mode == "NE" || mode == "SW")
+            hCur := hCursorNESW
+        else if (mode == "W" || mode == "E")
+            hCur := hCursorWE
+        else if (mode == "N" || mode == "S")
+            hCur := hCursorNS
+            
+        DllCall("SetCursor", "Ptr", hCur)
+        return 1
+    }
+}
+OnMessage(0x0020, OnWM_SETCURSOR)
+
+global ActiveBoxGuiDragCallback := ""
+
 ; =================================================================
 ; [WM_LBUTTONDOWN 懸浮列拖曳與拉桿精確等比例點選/滑動控制]
 ; =================================================================
 OnWM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
-    global ActiveBoxGuiHwnd, MyGui
+    global ActiveBoxGuiHwnd, ActiveBoxGuiDragCallback, MyGui
     if (ActiveBoxGuiHwnd && hwnd == ActiveBoxGuiHwnd) {
-        PostMessage(0xA1, 2, 0, hwnd)
+        CoordMode("Mouse", "Screen")
+        MouseGetPos(&startMX, &startMY)
+        mode := GetBoxHitMode(hwnd, startMX, startMY, &startX, &startY, &startW, &startH)
+        
+        while GetKeyState("LButton", "P") {
+            MouseGetPos(&curMX, &curMY)
+            dx := curMX - startMX
+            dy := curMY - startMY
+            
+            nx := startX, ny := startY, nw := startW, nh := startH
+            
+            if (mode == "MOVE") {
+                nx := startX + dx
+                ny := startY + dy
+            } else {
+                if InStr(mode, "E")
+                    nw := Max(4, startW + dx)
+                if InStr(mode, "S")
+                    nh := Max(4, startH + dy)
+                if InStr(mode, "W") {
+                    nw := Max(4, startW - dx)
+                    nx := startX + (startW - nw)
+                }
+                if InStr(mode, "N") {
+                    nh := Max(4, startH - dy)
+                    ny := startY + (startH - nh)
+                }
+            }
+            
+            WinMove(nx, ny, nw, nh, "ahk_id " . hwnd)
+            if (ActiveBoxGuiDragCallback)
+                ActiveBoxGuiDragCallback(nx, ny, nw, nh)
+            Sleep(15)
+        }
         return 0
     } else if (MyGui != "" && hwnd == MyGui.Hwnd) {
         PostMessage(0xA1, 2, 0, hwnd)
@@ -1224,7 +1315,7 @@ PromptEditColorDetect(step) {
     ownerHwnd := GetMacroEditGuiHwnd()
     ownerOpt := (ownerHwnd > 0) ? (" +Owner" . ownerHwnd) : ""
     
-    ctrlDlg := Gui("-MaximizeBox" . ownerOpt . " +AlwaysOnTop", "🎨 顏色偵測與觸發動作處置設定")
+    ctrlDlg := Gui("-MaximizeBox" . ownerOpt . " +AlwaysOnTop", "🎨 顏色偵測與觸發動作處置設定 (支援拖拉與邊緣縮放)")
     ctrlDlg.BackColor := "0x1A1A1A"
     ctrlDlg.SetFont("s10 bold cWhite", "Microsoft JhengHei")
     ActiveColorEditCtrlDlg := ctrlDlg
@@ -1396,7 +1487,7 @@ PromptEditColorDetect(step) {
         lblW.Value := curW " px"
         lblH.Value := curH " px"
         
-        ShowBoxGui(boxGui, curX, curY, curW, curH)
+        try WinMove(curX, curY, curW, curH, "ahk_id " . boxGui.Hwnd)
         TestColorDetect()
     }
     
@@ -1418,21 +1509,19 @@ PromptEditColorDetect(step) {
     }
     editColor.OnEvent("Change", OnColorInputChanged)
     
-    UpdateBoxPosText() {
-        if (boxGui && WinExist("ahk_id " . boxGui.Hwnd)) {
-            WinGetPos(&gx, &gy, , , "ahk_id " . boxGui.Hwnd)
-            if (gx != curX || gy != curY) {
-                curX := gx, curY := gy
-                isSliderUpdating := true
-                try {
-                    sldX.Value := curX, lblX.Value := curX " px"
-                    sldY.Value := curY, lblY.Value := curY " px"
-                }
-                isSliderUpdating := false
-                TestColorDetect()
-            }
+    SyncBoxFromDrag(nx, ny, nw, nh) {
+        curX := nx, curY := ny, curW := nw, curH := nh
+        isSliderUpdating := true
+        try {
+            sldX.Value := curX, lblX.Value := curX " px"
+            sldY.Value := curY, lblY.Value := curY " px"
+            sldW.Value := curW, lblW.Value := curW " px"
+            sldH.Value := curH, lblH.Value := curH " px"
         }
+        isSliderUpdating := false
+        TestColorDetect()
     }
+    ActiveBoxGuiDragCallback := SyncBoxFromDrag
     
     ReSampleColor() {
         try boxGui.Hide()
@@ -1459,7 +1548,7 @@ PromptEditColorDetect(step) {
         }
         isSliderUpdating := false
         
-        ShowBoxGui(boxGui, curX, curY, curW, curH)
+        try WinMove(curX, curY, curW, curH, "ahk_id " . boxGui.Hwnd)
         ctrlDlg.Show()
         
         try boxGui.Hide()
@@ -1482,10 +1571,10 @@ PromptEditColorDetect(step) {
     btnRedraw.OnEvent("Click", (*) => RedrawBox())
     
     CloseColorDialog(params*) {
-        global ActiveColorEditCtrlDlg
+        global ActiveColorEditCtrlDlg, ActiveBoxGuiDragCallback
         ActiveBoxGuiHwnd := 0
         ActiveColorEditCtrlDlg := ""
-        SetTimer(UpdateBoxPosText, 0)
+        ActiveBoxGuiDragCallback := ""
         try boxGui.Destroy()
         try ctrlDlg.Destroy()
     }
@@ -1528,8 +1617,6 @@ PromptEditColorDetect(step) {
         dlgX := Max(10, curX - 390)
         
     ctrlDlg.Show("X" dlgX " Y" dlgY " W380 H650")
-    
-    SetTimer(UpdateBoxPosText, 200)
 }
 
 ; =================================================================
@@ -1784,59 +1871,94 @@ PromptEditLoopGoto(step) {
 }
 
 ; =================================================================
-; [設定檔 INI 讀取與儲存]
+; [設定檔 INI 讀取與儲存 (純 UTF-8 編碼支援，完美保留 Emoji 與萬國碼)]
 ; =================================================================
+ParseIniFile(filePath) {
+    if !FileExist(filePath)
+        return Map()
+    try {
+        content := FileRead(filePath, "UTF-8")
+    } catch {
+        content := FileRead(filePath)
+    }
+    data := Map()
+    curSec := ""
+    for line in StrSplit(content, "`n", "`r") {
+        t := Trim(line)
+        if (t == "" || SubStr(t, 1, 1) == ";")
+            continue
+        if RegExMatch(t, "^\[(.*)\]$", &m) {
+            curSec := m[1]
+            if !data.Has(curSec)
+                data[curSec] := Map()
+        } else if (curSec != "" && InStr(t, "=")) {
+            pos := InStr(t, "=")
+            k := Trim(SubStr(t, 1, pos - 1))
+            v := Trim(SubStr(t, pos + 1))
+            data[curSec][k] := v
+        }
+    }
+    return data
+}
+
 SaveMacroConfig(targetPath := "") {
     global MacroGroups, ConfigFile, IsAlwaysOnTop
     saveFile := (targetPath != "") ? targetPath : ConfigFile
-    try FileDelete(saveFile)
     
-    IniWrite(MacroGroups.Length, saveFile, "General", "GroupCount")
-    IniWrite(IsAlwaysOnTop ? 1 : 0, saveFile, "General", "AlwaysOnTop")
+    txt := "[General]`r`n"
+    txt .= "GroupCount=" . MacroGroups.Length . "`r`n"
+    txt .= "AlwaysOnTop=" . (IsAlwaysOnTop ? 1 : 0) . "`r`n`r`n"
     
     for gIdx, grp in MacroGroups {
         grpSec := "Group_" . gIdx
-        IniWrite(grp.name, saveFile, grpSec, "Name")
-        IniWrite(grp.icon, saveFile, grpSec, "Icon")
-        IniWrite(grp.HasOwnProp("visible") ? grp.visible : 1, saveFile, grpSec, "Visible")
-        IniWrite(grp.loopCount, saveFile, grpSec, "LoopCount")
-        IniWrite(grp.steps.Length, saveFile, grpSec, "StepCount")
+        txt .= "[" . grpSec . "]`r`n"
+        txt .= "Name=" . grp.name . "`r`n"
+        txt .= "Icon=" . grp.icon . "`r`n"
+        txt .= "Visible=" . (grp.HasOwnProp("visible") ? grp.visible : 1) . "`r`n"
+        txt .= "LoopCount=" . grp.loopCount . "`r`n"
+        txt .= "StepCount=" . grp.steps.Length . "`r`n`r`n"
         
         for sIdx, step in grp.steps {
             sSec := "Group_" . gIdx . "_Step_" . sIdx
-            IniWrite(step.type, saveFile, sSec, "Type")
+            txt .= "[" . sSec . "]`r`n"
+            txt .= "Type=" . step.type . "`r`n"
             if (step.type == "color_detect") {
-                IniWrite(step.x, saveFile, sSec, "X")
-                IniWrite(step.y, saveFile, sSec, "Y")
-                IniWrite(step.w, saveFile, sSec, "W")
-                IniWrite(step.h, saveFile, sSec, "H")
-                IniWrite(step.color, saveFile, sSec, "Color")
-                IniWrite(step.clickCenterX, saveFile, sSec, "CenterX")
-                IniWrite(step.clickCenterY, saveFile, sSec, "CenterY")
-                IniWrite(step.HasOwnProp("tolerance") ? step.tolerance : 20, saveFile, sSec, "Tolerance")
-                IniWrite(step.HasOwnProp("invert") ? step.invert : 0, saveFile, sSec, "Invert")
-                
-                IniWrite(step.HasOwnProp("actionType") ? step.actionType : 0, saveFile, sSec, "ActionType")
-                IniWrite(step.HasOwnProp("pressKey") ? step.pressKey : "Space", saveFile, sSec, "PressKey")
-                IniWrite(step.HasOwnProp("holdMin") ? step.holdMin : 0, saveFile, sSec, "HoldMin")
-                IniWrite(step.HasOwnProp("holdSec") ? step.holdSec : 0, saveFile, sSec, "HoldSec")
-                
-                IniWrite(step.HasOwnProp("timeoutSec") ? step.timeoutSec : 0, saveFile, sSec, "TimeoutSec")
-                IniWrite(step.HasOwnProp("timeoutKey") ? step.timeoutKey : "", saveFile, sSec, "TimeoutKey")
-                IniWrite(step.HasOwnProp("timeoutMode") ? step.timeoutMode : 1, saveFile, sSec, "TimeoutMode")
-                IniWrite(step.HasOwnProp("jumpStep") ? step.jumpStep : 1, saveFile, sSec, "JumpStep")
+                txt .= "X=" . step.x . "`r`n"
+                txt .= "Y=" . step.y . "`r`n"
+                txt .= "W=" . step.w . "`r`n"
+                txt .= "H=" . step.h . "`r`n"
+                txt .= "Color=" . step.color . "`r`n"
+                txt .= "CenterX=" . step.clickCenterX . "`r`n"
+                txt .= "CenterY=" . step.clickCenterY . "`r`n"
+                txt .= "Tolerance=" . (step.HasOwnProp("tolerance") ? step.tolerance : 20) . "`r`n"
+                txt .= "Invert=" . (step.HasOwnProp("invert") ? step.invert : 0) . "`r`n"
+                txt .= "ActionType=" . (step.HasOwnProp("actionType") ? step.actionType : 0) . "`r`n"
+                txt .= "PressKey=" . (step.HasOwnProp("pressKey") ? step.pressKey : "Space") . "`r`n"
+                txt .= "HoldMin=" . (step.HasOwnProp("holdMin") ? step.holdMin : 0) . "`r`n"
+                txt .= "HoldSec=" . (step.HasOwnProp("holdSec") ? step.holdSec : 0) . "`r`n"
+                txt .= "TimeoutSec=" . (step.HasOwnProp("timeoutSec") ? step.timeoutSec : 0) . "`r`n"
+                txt .= "TimeoutKey=" . (step.HasOwnProp("timeoutKey") ? step.timeoutKey : "") . "`r`n"
+                txt .= "TimeoutMode=" . (step.HasOwnProp("timeoutMode") ? step.timeoutMode : 1) . "`r`n"
+                txt .= "JumpStep=" . (step.HasOwnProp("jumpStep") ? step.jumpStep : 1) . "`r`n"
             } else if (step.type == "key_press") {
-                IniWrite(step.HasOwnProp("key") ? step.key : "Space", saveFile, sSec, "Key")
-                IniWrite(step.HasOwnProp("holdMs") ? step.holdMs : 80, saveFile, sSec, "HoldMs")
-                IniWrite(step.HasOwnProp("delayMs") ? step.delayMs : 0, saveFile, sSec, "DelayMs")
-                IniWrite(step.HasOwnProp("repeat") ? step.repeat : 1, saveFile, sSec, "Repeat")
+                txt .= "Key=" . (step.HasOwnProp("key") ? step.key : "Space") . "`r`n"
+                txt .= "HoldMs=" . (step.HasOwnProp("holdMs") ? step.holdMs : 80) . "`r`n"
+                txt .= "DelayMs=" . (step.HasOwnProp("delayMs") ? step.delayMs : 0) . "`r`n"
+                txt .= "Repeat=" . (step.HasOwnProp("repeat") ? step.repeat : 1) . "`r`n"
             } else if (step.type == "wait") {
-                IniWrite(step.waitMs, saveFile, sSec, "WaitMs")
+                txt .= "WaitMs=" . step.waitMs . "`r`n"
             } else if (step.type == "loop_goto") {
-                IniWrite(step.HasOwnProp("targetStep") ? step.targetStep : 1, saveFile, sSec, "TargetStep")
-                IniWrite(step.HasOwnProp("maxLoops") ? step.maxLoops : 1, saveFile, sSec, "MaxLoops")
+                txt .= "TargetStep=" . (step.HasOwnProp("targetStep") ? step.targetStep : 1) . "`r`n"
+                txt .= "MaxLoops=" . (step.HasOwnProp("maxLoops") ? step.maxLoops : 1) . "`r`n"
             }
+            txt .= "`r`n"
         }
+    }
+    
+    try {
+        f := FileOpen(saveFile, "w", "UTF-8")
+        f.Write(txt)
+        f.Close()
     }
 }
 
@@ -1847,65 +1969,76 @@ LoadMacroConfig(targetPath := "") {
         return false
         
     try {
-        grpCount := Integer(IniRead(loadFile, "General", "GroupCount", "0"))
+        iniData := ParseIniFile(loadFile)
+        if !iniData.Has("General") || !iniData["General"].Has("GroupCount")
+            return false
+            
+        grpCount := Integer(iniData["General"]["GroupCount"])
         if (grpCount <= 0)
             return false
             
-        IsAlwaysOnTop := Integer(IniRead(loadFile, "General", "AlwaysOnTop", "1")) != 0
+        IsAlwaysOnTop := iniData["General"].Has("AlwaysOnTop") ? (Integer(iniData["General"]["AlwaysOnTop"]) != 0) : true
         loadedGroups := []
+        
+        GetVal(sec, key, defVal := "") {
+            if iniData.Has(sec) && iniData[sec].Has(key)
+                return iniData[sec][key]
+            return defVal
+        }
+        
         Loop grpCount {
             gIdx := A_Index
             grpSec := "Group_" . gIdx
-            grpName := IniRead(loadFile, grpSec, "Name", "群組 " . gIdx)
-            grpIcon := IniRead(loadFile, grpSec, "Icon", "⚔️")
-            grpVis := Integer(IniRead(loadFile, grpSec, "Visible", "1"))
-            grpLoop := Integer(IniRead(loadFile, grpSec, "LoopCount", "1"))
-            stepCount := Integer(IniRead(loadFile, grpSec, "StepCount", "0"))
+            grpName := GetVal(grpSec, "Name", "群組 " . gIdx)
+            grpIcon := GetVal(grpSec, "Icon", "⚔️")
+            grpVis := Integer(GetVal(grpSec, "Visible", "1"))
+            grpLoop := Integer(GetVal(grpSec, "LoopCount", "1"))
+            stepCount := Integer(GetVal(grpSec, "StepCount", "0"))
             
             steps := []
             Loop stepCount {
                 sIdx := A_Index
                 sSec := "Group_" . gIdx . "_Step_" . sIdx
-                sType := IniRead(loadFile, sSec, "Type", "")
+                sType := GetVal(sSec, "Type", "")
                 if (sType == "color_detect") {
                     steps.Push({
                         type: "color_detect",
-                        x: Integer(IniRead(loadFile, sSec, "X", "0")),
-                        y: Integer(IniRead(loadFile, sSec, "Y", "0")),
-                        w: Integer(IniRead(loadFile, sSec, "W", "0")),
-                        h: Integer(IniRead(loadFile, sSec, "H", "0")),
-                        color: IniRead(loadFile, sSec, "Color", "0xFFFFFF"),
-                        clickCenterX: Integer(IniRead(loadFile, sSec, "CenterX", "0")),
-                        clickCenterY: Integer(IniRead(loadFile, sSec, "CenterY", "0")),
-                        tolerance: Integer(IniRead(loadFile, sSec, "Tolerance", "20")),
-                        invert: Integer(IniRead(loadFile, sSec, "Invert", "0")),
-                        actionType: Integer(IniRead(loadFile, sSec, "ActionType", "0")),
-                        pressKey: IniRead(loadFile, sSec, "PressKey", "Space"),
-                        holdMin: Integer(IniRead(loadFile, sSec, "HoldMin", "0")),
-                        holdSec: Integer(IniRead(loadFile, sSec, "HoldSec", "0")),
-                        timeoutSec: Integer(IniRead(loadFile, sSec, "TimeoutSec", "0")),
-                        timeoutKey: IniRead(loadFile, sSec, "TimeoutKey", ""),
-                        timeoutMode: Integer(IniRead(loadFile, sSec, "TimeoutMode", "1")),
-                        jumpStep: Integer(IniRead(loadFile, sSec, "JumpStep", "1"))
+                        x: Integer(GetVal(sSec, "X", "0")),
+                        y: Integer(GetVal(sSec, "Y", "0")),
+                        w: Integer(GetVal(sSec, "W", "0")),
+                        h: Integer(GetVal(sSec, "H", "0")),
+                        color: GetVal(sSec, "Color", "0xFFFFFF"),
+                        clickCenterX: Integer(GetVal(sSec, "CenterX", "0")),
+                        clickCenterY: Integer(GetVal(sSec, "CenterY", "0")),
+                        tolerance: Integer(GetVal(sSec, "Tolerance", "20")),
+                        invert: Integer(GetVal(sSec, "Invert", "0")),
+                        actionType: Integer(GetVal(sSec, "ActionType", "0")),
+                        pressKey: GetVal(sSec, "PressKey", "Space"),
+                        holdMin: Integer(GetVal(sSec, "HoldMin", "0")),
+                        holdSec: Integer(GetVal(sSec, "HoldSec", "0")),
+                        timeoutSec: Integer(GetVal(sSec, "TimeoutSec", "0")),
+                        timeoutKey: GetVal(sSec, "TimeoutKey", ""),
+                        timeoutMode: Integer(GetVal(sSec, "TimeoutMode", "1")),
+                        jumpStep: Integer(GetVal(sSec, "JumpStep", "1"))
                     })
                 } else if (sType == "key_press") {
                     steps.Push({
                         type: "key_press",
-                        key: IniRead(loadFile, sSec, "Key", "Space"),
-                        holdMs: Integer(IniRead(loadFile, sSec, "HoldMs", "80")),
-                        delayMs: Integer(IniRead(loadFile, sSec, "DelayMs", "0")),
-                        repeat: Integer(IniRead(loadFile, sSec, "Repeat", "1"))
+                        key: GetVal(sSec, "Key", "Space"),
+                        holdMs: Integer(GetVal(sSec, "HoldMs", "80")),
+                        delayMs: Integer(GetVal(sSec, "DelayMs", "0")),
+                        repeat: Integer(GetVal(sSec, "Repeat", "1"))
                     })
                 } else if (sType == "wait") {
                     steps.Push({
                         type: "wait",
-                        waitMs: Integer(IniRead(loadFile, sSec, "WaitMs", "1000"))
+                        waitMs: Integer(GetVal(sSec, "WaitMs", "1000"))
                     })
                 } else if (sType == "loop_goto") {
                     steps.Push({
                         type: "loop_goto",
-                        targetStep: Integer(IniRead(loadFile, sSec, "TargetStep", "1")),
-                        maxLoops: Integer(IniRead(loadFile, sSec, "MaxLoops", "5"))
+                        targetStep: Integer(GetVal(sSec, "TargetStep", "1")),
+                        maxLoops: Integer(GetVal(sSec, "MaxLoops", "5"))
                     })
                 }
             }
