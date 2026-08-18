@@ -725,20 +725,26 @@ ToggleMacroEditGui() {
     MacroEditGui.OnEvent("Close", (*) => (MacroEditGui := ""))
     
     ; 頂部：群組選擇下拉選單與操作按鈕列
-    MacroEditGui.Add("Text", "x15 y16 w75 h25 cWhite", "選擇群組:")
+    MacroEditGui.Add("Text", "x15 y16 w65 h25 cWhite", "選擇群組:")
     
     groupList := GetGroupDisplayList()
     chooseIdx := (ActiveEditGroupIdx <= groupList.Length) ? ActiveEditGroupIdx : 1
-    DDLGroupSelect := MacroEditGui.Add("DropDownList", "x95 y12 w250 Background0x2A2A2A c0x00FFFF Choose" . chooseIdx, groupList)
+    DDLGroupSelect := MacroEditGui.Add("DropDownList", "x82 y12 w215 Background0x2A2A2A c0x00FFFF Choose" . chooseIdx, groupList)
     DDLGroupSelect.OnEvent("Change", (ctrl, *) => SwitchActiveGroup(ctrl.Value))
     
-    btnAddGrp := MacroEditGui.Add("Button", "x355 y10 w75 h32 Background0x008800", "➕ 新增")
+    btnMoveGrpLeft := MacroEditGui.Add("Button", "x302 y10 w32 h32 Background0x282828", "◀")
+    btnMoveGrpLeft.OnEvent("Click", (*) => MoveActiveGroup(-1))
+    
+    btnMoveGrpRight := MacroEditGui.Add("Button", "x337 y10 w32 h32 Background0x282828", "▶")
+    btnMoveGrpRight.OnEvent("Click", (*) => MoveActiveGroup(1))
+    
+    btnAddGrp := MacroEditGui.Add("Button", "x374 y10 w70 h32 Background0x008800", "➕ 新增")
     btnAddGrp.OnEvent("Click", (*) => PromptAddGroup())
     
-    btnEditGrp := MacroEditGui.Add("Button", "x435 y10 w75 h32 Background0x282828", "✏ 重命名")
+    btnEditGrp := MacroEditGui.Add("Button", "x448 y10 w70 h32 Background0x282828", "✏ 編輯")
     btnEditGrp.OnEvent("Click", (*) => PromptEditGroup())
     
-    btnDelGrp := MacroEditGui.Add("Button", "x515 y10 w75 h32 Background0x882222", "🗑 刪除")
+    btnDelGrp := MacroEditGui.Add("Button", "x522 y10 w68 h32 Background0x882222", "🗑 刪除")
     btnDelGrp.OnEvent("Click", (*) => DeleteActiveGroup())
     
     ; 中間：步驟清單 ListView
@@ -921,9 +927,30 @@ DeleteActiveGroup() {
     if (ActiveEditGroupIdx >= 1 && ActiveEditGroupIdx <= MacroGroups.Length) {
         MacroGroups.RemoveAt(ActiveEditGroupIdx)
         ActiveEditGroupIdx := Min(ActiveEditGroupIdx, MacroGroups.Length)
+        SaveMacroConfig()
         BuildMainGui()
         RebuildMacroEditGui()
     }
+}
+
+MoveActiveGroup(offset) {
+    global MacroGroups, ActiveEditGroupIdx
+    if (ActiveEditGroupIdx < 1 || ActiveEditGroupIdx > MacroGroups.Length)
+        return
+        
+    targetIdx := ActiveEditGroupIdx + offset
+    if (targetIdx < 1 || targetIdx > MacroGroups.Length)
+        return
+        
+    ; 交換相鄰群組物件
+    temp := MacroGroups[ActiveEditGroupIdx]
+    MacroGroups[ActiveEditGroupIdx] := MacroGroups[targetIdx]
+    MacroGroups[targetIdx] := temp
+    
+    ActiveEditGroupIdx := targetIdx
+    SaveMacroConfig()
+    BuildMainGui()
+    RebuildMacroEditGui()
 }
 
 RefreshMacroListView() {
@@ -1962,8 +1989,8 @@ SaveMacroConfig(targetPath := "") {
     }
 }
 
-LoadMacroConfig(targetPath := "") {
-    global MacroGroups, ConfigFile, IsAlwaysOnTop
+LoadMacroConfig(targetPath := "", isAppend := false) {
+    global MacroGroups, ConfigFile, IsAlwaysOnTop, ActiveEditGroupIdx
     loadFile := (targetPath != "") ? targetPath : ConfigFile
     if !FileExist(loadFile)
         return false
@@ -1977,7 +2004,9 @@ LoadMacroConfig(targetPath := "") {
         if (grpCount <= 0)
             return false
             
-        IsAlwaysOnTop := iniData["General"].Has("AlwaysOnTop") ? (Integer(iniData["General"]["AlwaysOnTop"]) != 0) : true
+        if (!isAppend && iniData["General"].Has("AlwaysOnTop"))
+            IsAlwaysOnTop := (Integer(iniData["General"]["AlwaysOnTop"]) != 0)
+            
         loadedGroups := []
         
         GetVal(sec, key, defVal := "") {
@@ -2053,7 +2082,15 @@ LoadMacroConfig(targetPath := "") {
         }
         
         if (loadedGroups.Length > 0) {
-            MacroGroups := loadedGroups
+            if (isAppend) {
+                origLen := MacroGroups.Length
+                for g in loadedGroups
+                    MacroGroups.Push(g)
+                ActiveEditGroupIdx := origLen + 1
+            } else {
+                MacroGroups := loadedGroups
+                ActiveEditGroupIdx := 1
+            }
             return true
         }
     }
@@ -2061,20 +2098,57 @@ LoadMacroConfig(targetPath := "") {
 }
 
 ImportMacroConfig() {
-    global ActiveEditGroupIdx
+    global ActiveEditGroupIdx, MacroGroups, IsAlwaysOnTop
     selectedFile := FileSelect(1, A_ScriptDir, "📥 選擇要匯入的巨集 INI 設定檔", "INI 設定檔 (*.ini)")
     if (selectedFile == "")
         return
         
-    if LoadMacroConfig(selectedFile) {
-        ActiveEditGroupIdx := 1
-        SaveMacroConfig()
-        BuildMainGui()
-        RebuildMacroEditGui()
-        MsgBox("🟢 成功匯入 INI 巨集設定！`n已載入 " . MacroGroups.Length . " 個群組設定資料。", "匯入成功", "262192")
-    } else {
-        MsgBox("❌ 匯入失敗！`n所選 INI 檔案格式無效或未包含巨集群組與步驟資料。", "匯入錯誤", "262192")
+    iniData := ParseIniFile(selectedFile)
+    if !iniData.Has("General") || !iniData["General"].Has("GroupCount") {
+        MsgBox("❌ 匯入失敗！`n所選 INI 檔案格式無效或未包含群組資料。", "匯入錯誤", "262192")
+        return
     }
+    
+    fileGrpCount := Integer(iniData["General"]["GroupCount"])
+    if (fileGrpCount <= 0) {
+        MsgBox("❌ 匯入失敗！`n檔案中的群組數量為 0。", "匯入錯誤", "262192")
+        return
+    }
+    
+    ownerHwnd := GetMacroEditGuiHwnd()
+    ownerOpt := (ownerHwnd > 0) ? (" +Owner" . ownerHwnd) : ""
+    topOpt := IsAlwaysOnTop ? " +AlwaysOnTop" : " -AlwaysOnTop"
+    
+    dlg := Gui("-MaximizeBox" . ownerOpt . topOpt, "📥 選擇匯入方式")
+    dlg.BackColor := "0x1A1A1A"
+    dlg.SetFont("s10 bold cWhite", "Microsoft JhengHei")
+    
+    dlg.Add("Text", "x20 y18 w340 h45 c0x00FFFF", Format("即將匯入之檔案包含 {} 個巨集群組。`n請選擇要「覆蓋所有現有群組」或「追加新增至清單後方」：", fileGrpCount))
+    
+    btnOverwrite := dlg.Add("Button", "x20 y75 w160 h40 Background0x882222", "🔄 覆蓋所有現有群組")
+    btnAppend := dlg.Add("Button", "x195 y75 w165 h40 Background0x008800", "➕ 追加新增至現有群組")
+    btnCancel := dlg.Add("Button", "x130 y125 w120 h32 Background0x333333", "取消")
+    
+    DoExecuteImport(isAppend) {
+        dlg.Destroy()
+        if LoadMacroConfig(selectedFile, isAppend) {
+            SaveMacroConfig()
+            BuildMainGui()
+            RebuildMacroEditGui()
+            if (isAppend)
+                MsgBox(Format("🟢 成功追加匯入 {} 個群組！`n目前共有 {} 個巨集群組。", fileGrpCount, MacroGroups.Length), "追加匯入成功", "262192")
+            else
+                MsgBox(Format("🟢 成功覆蓋匯入！`n已載入 {} 個群組設定資料。", MacroGroups.Length), "覆蓋匯入成功", "262192")
+        } else {
+            MsgBox("❌ 匯入解析失敗！檔案格式不符。", "匯入錯誤", "262192")
+        }
+    }
+    
+    btnOverwrite.OnEvent("Click", (*) => DoExecuteImport(false))
+    btnAppend.OnEvent("Click", (*) => DoExecuteImport(true))
+    btnCancel.OnEvent("Click", (*) => dlg.Destroy())
+    dlg.OnEvent("Close", (*) => dlg.Destroy())
+    dlg.Show("w380 h170")
 }
 
 ExportMacroConfig() {
