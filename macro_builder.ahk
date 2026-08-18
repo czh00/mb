@@ -1,5 +1,5 @@
 ; =================================================================
-; MacroBuilder (MB) v1.0.0
+; MacroBuilder (MB)
 ; AutoHotkey v2.0 - 多群組畫面顏色偵測與點擊、按鍵與等待巨集編輯與執行器
 ; 懸浮齒輪 UI、獨立執行圖示、GDI 雙層進度條、拉桿控制
 ; =================================================================
@@ -11,7 +11,7 @@ SetMouseDelay(-1)
 SetWinDelay(-1)
 SetControlDelay(-1)
 
-; === 系統管理員權限提升與容錯備援 (若關閉 UAC 或拒絕授權仍能繼續運行) ===
+; === 系統管理員權限提升與容錯備援 ===
 if !A_IsAdmin {
     try {
         if !A_IsCompiled
@@ -48,28 +48,28 @@ global StopMacroRequested := false
 
 global ConfigFile := A_ScriptDir . "\macro_config.ini"
 
-; 主懸浮 UI 變數與 Z 軸置頂控制
+; 主懸浮 UI 變數
 global MyGui := ""
-global IsAlwaysOnTop := true     ; 預設允許使用者自由切換 Z 軸置頂狀態
+global IsAlwaysOnTop := true
 global GuiX := 0, GuiY := 0, GuiH := 34, GuiOpacity := 240
 global ProgressBarWidth := 500
 global ProgressPic := ""
 global hCurrentProgressBmp := 0
-global GearBtn := "", PinBtn := "", ExitBtn := ""
+global GearBtn := "", ExitBtn := ""
 global GroupBtns := []          ; 動態群組執行按鈕控制項陣列
 
 ; 編輯器 UI 變數
 global MacroEditGui := ""
-global GroupTabCtrls := []
+global DDLGroupSelect := ""
 global MacroLV := ""
 global LoopCountSlider := "", LoopCountLabel := ""
 
-; 單一編輯視窗唯一性鎖定變數 (Singleton Editor Locks)
+; 單一編輯視窗唯一性鎖定變數
 global ActiveBoxGuiHwnd := 0
 global ActiveColorEditCtrlDlg := ""
 global ActiveStepEditDlg := ""
 
-; 豐富彩色 Unicode 圖示矩陣 (Color Segoe UI Emoji)
+; 豐富彩色 Unicode 圖示清單
 global IconPresets := [
     "⚔️", "⚡️", "🚗", "🎖️", "🏆",
     "🎰", "⚙️", "🎯", "🛡️", "🔥",
@@ -77,16 +77,301 @@ global IconPresets := [
     "🔑", "🛠️", "🧭", "🍀", "⏱️"
 ]
 
+; 按鍵分類字典
+global KeyCategories := Map(
+    "🔤 字母鍵 (A - Z)", [
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
+        "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T",
+        "U", "V", "W", "X", "Y", "Z"
+    ],
+    "🔢 數字鍵 (0 - 9 & 數字盤)", [
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "Numpad0", "Numpad1", "Numpad2", "Numpad3", "Numpad4",
+        "Numpad5", "Numpad6", "Numpad7", "Numpad8", "Numpad9",
+        "NumpadDot", "NumpadEnter", "NumpadAdd", "NumpadSub", "NumpadMult", "NumpadDiv"
+    ],
+    "⚙️ 功能鍵 (控制/導航/F鍵/修飾)", [
+        "Space", "Enter", "Escape", "Tab", "Backspace", "Delete",
+        "Up", "Down", "Left", "Right", "Home", "End", "PgUp", "PgDn",
+        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+        "Shift", "Ctrl", "Alt", "LWin", "RWin", "CapsLock", "PrintScreen", "Insert"
+    ]
+)
+
+; 輔助安全擷取 6 碼 HEX 色碼
+GetFirstHexColor(str) {
+    if RegExMatch(str, "i)(?:0x)?([0-9a-f]{6})", &m)
+        return m[1]
+    return "00FFFF"
+}
+
 ; =================================================================
-; [WM_LBUTTONDOWN 點擊圈選框即可自由拖動]
+; [通用時間階梯與格式化 (毫秒 ➔ 秒 ➔ 分 ➔ 時)]
+; - 按住時間拉桿 / 等待拉桿 / 逾時拉桿：最久 10 分鐘 (0~900ms 毫秒微調，1秒~10分 每格 1 秒)
+; - 完成延遲拉桿：最久 1 分鐘 (0~900ms 毫秒微調，1秒~60秒 每格 1 秒)
+; =================================================================
+InitHoldTimeStepTable() {
+    tbl := []
+    for ms in [0, 20, 40, 60, 80, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900]
+        tbl.Push(ms)
+    sec := 1
+    while (sec <= 600) { ; 600 秒 = 10 分鐘
+        tbl.Push(sec * 1000)
+        sec++
+    }
+    return tbl
+}
+
+InitDelayTimeStepTable() {
+    tbl := []
+    for ms in [0, 20, 40, 60, 80, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900]
+        tbl.Push(ms)
+    sec := 1
+    while (sec <= 60) { ; 60 秒 = 1 分鐘
+        tbl.Push(sec * 1000)
+        sec++
+    }
+    return tbl
+}
+
+global HoldTimeTable := InitHoldTimeStepTable()
+global DelayTimeTable := InitDelayTimeStepTable()
+global TimeStepTable := HoldTimeTable
+
+FormatDurationText(ms) {
+    if (ms <= 0)
+        return "0毫秒"
+    if (ms < 1000)
+        return Format("{}毫秒", ms)
+    if (ms < 60000) {
+        remMs := Mod(ms, 1000)
+        if (remMs == 0)
+            return Format("{}秒", ms // 1000)
+        else
+            return Format("{:.1f}秒", ms / 1000)
+    }
+    if (ms < 3600000) {
+        min := ms // 60000
+        remMs := ms - min * 60000
+        remSec := remMs // 1000
+        extraMs := Mod(remMs, 1000)
+        
+        if (remSec == 0 && extraMs == 0)
+            return Format("{}分", min)
+        else if (extraMs == 0)
+            return Format("{}分{}秒", min, remSec)
+        else
+            return Format("{}分{:.1f}秒", min, remMs / 1000)
+    }
+    hr := ms // 3600000
+    remMs := ms - hr * 3600000
+    min := remMs // 60000
+    remSec := (remMs - min * 60000) // 1000
+    
+    if (min == 0 && remSec == 0)
+        return Format("{}小時", hr)
+    else if (remSec == 0)
+        return Format("{}小時{}分", hr, min)
+    else
+        return Format("{}小時{}分{}秒", hr, min, remSec)
+}
+
+MsToTimeStep(ms, tbl := "") {
+    global TimeStepTable
+    targetTbl := (tbl != "") ? tbl : TimeStepTable
+    bestIdx := 1
+    minDiff := Abs(targetTbl[1] - ms)
+    for idx, val in targetTbl {
+        diff := Abs(val - ms)
+        if (diff < minDiff) {
+            minDiff := diff
+            bestIdx := idx
+        }
+    }
+    return bestIdx
+}
+
+TimeStepToMs(stepIdx, tbl := "") {
+    global TimeStepTable
+    targetTbl := (tbl != "") ? tbl : TimeStepTable
+    if (stepIdx < 1)
+        return targetTbl[1]
+    if (stepIdx > targetTbl.Length)
+        return targetTbl[targetTbl.Length]
+    return targetTbl[stepIdx]
+}
+
+; =================================================================
+; [WM_LBUTTONDOWN 懸浮列拖曳與拉桿精確等比例點選/滑動控制]
 ; =================================================================
 OnWM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
-    global ActiveBoxGuiHwnd
+    global ActiveBoxGuiHwnd, MyGui
     if (ActiveBoxGuiHwnd && hwnd == ActiveBoxGuiHwnd) {
-        PostMessage(0xA1, 2, 0, hwnd) ; WM_NCLBUTTONDOWN + HTCAPTION
+        PostMessage(0xA1, 2, 0, hwnd)
+        return 0
+    } else if (MyGui != "" && hwnd == MyGui.Hwnd) {
+        PostMessage(0xA1, 2, 0, hwnd)
+        return 0
+    }
+    
+    try {
+        cls := WinGetClass(hwnd)
+    } catch {
+        cls := ""
+    }
+    if (cls == "msctls_trackbar32") {
+        ctrlObj := GuiCtrlFromHwnd(hwnd)
+        if (ctrlObj) {
+            guiHwnd := ctrlObj.Gui.Hwnd
+            CoordMode("Mouse", "Screen")
+            MouseGetPos(&mX, &mY)
+            
+            ; 透過 ScreenToClient 取得控制項自身的精確像素座標
+            pt := Buffer(8, 0)
+            NumPut("int", mX, pt, 0), NumPut("int", mY, pt, 4)
+            DllCall("user32\ScreenToClient", "Ptr", hwnd, "Ptr", pt)
+            relativeX := NumGet(pt, 0, "Int")
+            currVal := ctrlObj.Value
+            
+            ; 取得控制點的精確像素範圍 (TBM_GETTHUMBRECT = 0x0419)
+            thumbRect := Buffer(16, 0)
+            SendMessage(0x0419, 0, thumbRect, hwnd)
+            tLeft := NumGet(thumbRect, 0, "Int")
+            tRight := NumGet(thumbRect, 8, "Int")
+            
+            ; 1. 若點在控制點本體 (Thumb) 上，交由系統原生拖曳處理 (無任何跳躍)
+            if (relativeX >= tLeft && relativeX <= tRight) {
+                return
+            }
+            
+            ; 取得軌道精確像素範圍 (TBM_GETCHANNELRECT = 0x041A)
+            chanRect := Buffer(16, 0)
+            SendMessage(0x041A, 0, chanRect, hwnd)
+            cLeft := NumGet(chanRect, 0, "Int")
+            cRight := NumGet(chanRect, 8, "Int")
+            channelWidth := cRight - cLeft
+            
+            if (channelWidth > 0) {
+                minVal := SendMessage(0x0401, 0, 0, hwnd)
+                maxVal := SendMessage(0x0402, 0, 0, hwnd)
+                if (maxVal > minVal) {
+                    CalcSafeStep(dist) {
+                        if (dist <= 20)
+                            return 1 ; 近距離微調嚴格保證只跳 1 格
+                        else if (dist <= 50)
+                            return Max(1, Min(5, Round((dist - 20) / 6))) ; 中距離步進 1 ~ 5 格
+                        else
+                            return Max(5, Min(20, Round(((dist / channelWidth) * (maxVal - minVal)) * 0.05))) ; 遠距離步進最大 20 格
+                    }
+                    
+                    ; 2. 計算點擊處對應的目標數值
+                    pctTarget := (relativeX - cLeft) / (cRight - cLeft)
+                    pctTarget := Min(1.0, Max(0.0, pctTarget))
+                    targetVal := Round(minVal + pctTarget * (maxVal - minVal))
+                    
+                    isMovingRight := (relativeX > tRight)
+                    
+                    ; 點擊瞬間執行單次安全微調步進 (點一次保證只走 1 格，絕不瞬移)
+                    if (isMovingRight) {
+                        distPx := relativeX - tRight
+                        ctrlObj.Value := Min(targetVal, currVal + CalcSafeStep(distPx))
+                    } else {
+                        distPx := tLeft - relativeX
+                        ctrlObj.Value := Max(targetVal, currVal - CalcSafeStep(distPx))
+                    }
+                    PostMessage(0x0114, 4, hwnd, guiHwnd)
+                    
+                    ; 3. 若按住不放，持續以步進前進，直到數值抵達游標目標 (重合) 後無縫切換為拖曳
+                    holdTicks := 0
+                    isCaptured := (ctrlObj.Value == targetVal)
+                    
+                    while GetKeyState("LButton", "P") {
+                        Sleep(20)
+                        MouseGetPos(&curX, &curY)
+                        ptCurrent := Buffer(8, 0)
+                        NumPut("int", curX, ptCurrent, 0), NumPut("int", curY, ptCurrent, 4)
+                        DllCall("user32\ScreenToClient", "Ptr", hwnd, "Ptr", ptCurrent)
+                        curRelX := NumGet(ptCurrent, 0, "Int")
+                        
+                        if (isCaptured) {
+                            ; 已經步進追上游標，進入與直接點住拉柄相同的即時拖曳模式
+                            pct := (curRelX - cLeft) / (cRight - cLeft)
+                            pct := Min(1.0, Max(0.0, pct))
+                            dragVal := Round(minVal + pct * (maxVal - minVal))
+                            if (ctrlObj.Value != dragVal) {
+                                ctrlObj.Value := dragVal
+                                PostMessage(0x0114, 4, hwnd, guiHwnd)
+                            }
+                        } else {
+                            ; 尚未追上，更新當前目標與拉柄位置
+                            curPctTarget := (curRelX - cLeft) / (cRight - cLeft)
+                            curPctTarget := Min(1.0, Max(0.0, curPctTarget))
+                            curTargetVal := Round(minVal + curPctTarget * (maxVal - minVal))
+                            
+                            SendMessage(0x0419, 0, thumbRect, hwnd)
+                            curTLeft := NumGet(thumbRect, 0, "Int")
+                            curTRight := NumGet(thumbRect, 8, "Int")
+                            
+                            holdTicks++
+                            if (holdTicks > 6) {
+                                if (curRelX > curTRight) {
+                                    distPx := curRelX - curTRight
+                                    stepVal := CalcSafeStep(distPx)
+                                    ctrlObj.Value := Min(curTargetVal, ctrlObj.Value + stepVal)
+                                    PostMessage(0x0114, 4, hwnd, guiHwnd)
+                                    if (ctrlObj.Value >= curTargetVal)
+                                        isCaptured := true
+                                } else if (curRelX < curTLeft) {
+                                    distPx := curTLeft - curRelX
+                                    stepVal := CalcSafeStep(distPx)
+                                    ctrlObj.Value := Max(curTargetVal, ctrlObj.Value - stepVal)
+                                    PostMessage(0x0114, 4, hwnd, guiHwnd)
+                                    if (ctrlObj.Value <= curTargetVal)
+                                        isCaptured := true
+                                } else {
+                                    isCaptured := true
+                                }
+                            }
+                        }
+                    }
+                    return 0
+                }
+            }
+        }
     }
 }
 OnMessage(0x0201, OnWM_LBUTTONDOWN)
+
+; =================================================================
+; [WM_MOUSEWHEEL 滑鼠滾輪即時微調拉桿數值]
+; =================================================================
+OnWM_MOUSEWHEEL(wParam, lParam, msg, hwnd) {
+    MouseGetPos(, , , &ctrlHwnd, 2)
+    if (!ctrlHwnd)
+        return
+    try {
+        cls := WinGetClass(ctrlHwnd)
+    } catch {
+        cls := ""
+    }
+    if (cls == "msctls_trackbar32") {
+        ctrlObj := GuiCtrlFromHwnd(ctrlHwnd)
+        if (ctrlObj) {
+            delta := (wParam >> 16) > 0x7FFF ? (wParam >> 16) - 0x10000 : (wParam >> 16)
+            minVal := SendMessage(0x0401, 0, 0, ctrlHwnd)
+            maxVal := SendMessage(0x0402, 0, 0, ctrlHwnd)
+            stepSize := GetKeyState("Shift", "P") ? 10 : 1
+            if (delta > 0) {
+                ctrlObj.Value := Min(maxVal, ctrlObj.Value + stepSize)
+            } else if (delta < 0) {
+                ctrlObj.Value := Max(minVal, ctrlObj.Value - stepSize)
+            }
+            PostMessage(0x0114, 4, ctrlHwnd, ctrlObj.Gui.Hwnd)
+            return 0
+        }
+    }
+}
+OnMessage(0x020A, OnWM_MOUSEWHEEL)
 
 ; =================================================================
 ; [安全獲取有效 GUI 句柄 Helper]
@@ -104,7 +389,6 @@ GetMacroEditGuiHwnd() {
     return 0
 }
 
-; === 精準視窗位置與尺寸 Helper ===
 GetBoxPos(guiObj, &gX, &gY, &gW, &gH) {
     try {
         if WinExist("ahk_id " . guiObj.Hwnd) {
@@ -147,7 +431,7 @@ GetVisibleGroupCount() {
 }
 
 ; =================================================================
-; [主懸浮 UI 建立、Z軸置頂切換與右鍵選單區]
+; [主懸浮 UI 建立]
 ; =================================================================
 BuildMainGui() {
     global MyGui, ProgressPic, GearBtn, ExitBtn, GroupBtns, MacroGroups, RunningGroupIdx, IsAlwaysOnTop
@@ -315,10 +599,21 @@ RenderProgressBarBitmap(loopPercent, totalPercent, text, w := 500, h := 28) {
 }
 
 ; =================================================================
-; [多群組頁籤 (Tab Card Grid) 矩陣與步驟編輯器 GUI]
+; [多群組巨集編輯與管理介面 GUI (使用下拉選單切換群組)]
 ; =================================================================
+GetGroupDisplayList() {
+    global MacroGroups
+    list := []
+    for idx, grp in MacroGroups {
+        isVis := !grp.HasOwnProp("visible") || grp.visible
+        visTag := isVis ? "" : " [隱藏]"
+        list.Push(Format("{}. {} {}{}", idx, grp.icon, grp.name, visTag))
+    }
+    return list
+}
+
 ToggleMacroEditGui() {
-    global MacroEditGui, GroupTabCtrls, MacroLV, LoopCountSlider, LoopCountLabel, MacroGroups, ActiveEditGroupIdx, MyGui, IsAlwaysOnTop
+    global MacroEditGui, DDLGroupSelect, MacroLV, LoopCountSlider, LoopCountLabel, MacroGroups, ActiveEditGroupIdx, MyGui, IsAlwaysOnTop
     
     if (MacroEditGui != "") {
         try {
@@ -333,57 +628,31 @@ ToggleMacroEditGui() {
     ownerOpt := (ownerHwnd > 0) ? (" +Owner" . ownerHwnd) : ""
     topOpt := IsAlwaysOnTop ? " +AlwaysOnTop" : " -AlwaysOnTop"
     
-    MacroEditGui := Gui("-MaximizeBox" . ownerOpt . topOpt, "⚙ 多群組巨集編輯與頁籤管理介面")
+    MacroEditGui := Gui("-MaximizeBox" . ownerOpt . topOpt, "⚙ 巨集編輯與管理介面")
     MacroEditGui.BackColor := "0x121212"
-    MacroEditGui.SetFont("s10 bold cWhite", "Segoe UI Emoji")
+    MacroEditGui.SetFont("s10 bold cWhite", "Microsoft JhengHei")
     MacroEditGui.OnEvent("Close", (*) => (MacroEditGui := ""))
     
-    ; 頂部：標題與群組頁籤矩陣
-    MacroEditGui.Add("Text", "x15 y12 w400 h22 c0x00FFFF", "📋 選擇巨集群組頁籤 (點擊切換當前群組):")
+    ; 頂部：群組選擇下拉選單與操作按鈕列
+    MacroEditGui.Add("Text", "x15 y16 w75 h25 cWhite", "選擇群組:")
     
-    ; 右上角群組管理按鈕列
-    btnAddGrp := MacroEditGui.Add("Button", "x445 y10 w150 h32 Background0x008800", "➕ 新增巨集群組")
+    groupList := GetGroupDisplayList()
+    chooseIdx := (ActiveEditGroupIdx <= groupList.Length) ? ActiveEditGroupIdx : 1
+    DDLGroupSelect := MacroEditGui.Add("DropDownList", "x95 y12 w250 Background0x2A2A2A c0x00FFFF Choose" . chooseIdx, groupList)
+    DDLGroupSelect.OnEvent("Change", (ctrl, *) => SwitchActiveGroup(ctrl.Value))
+    
+    btnAddGrp := MacroEditGui.Add("Button", "x355 y10 w75 h32 Background0x008800", "➕ 新增")
     btnAddGrp.OnEvent("Click", (*) => PromptAddGroup())
     
-    btnEditGrp := MacroEditGui.Add("Button", "x445 y46 w73 h30 Background0x282828", "✏ 重命名")
+    btnEditGrp := MacroEditGui.Add("Button", "x435 y10 w75 h32 Background0x282828", "✏ 重命名")
     btnEditGrp.OnEvent("Click", (*) => PromptEditGroup())
     
-    btnDelGrp := MacroEditGui.Add("Button", "x522 y46 w73 h30 Background0x882222", "🗑 刪除")
+    btnDelGrp := MacroEditGui.Add("Button", "x515 y10 w75 h32 Background0x882222", "🗑 刪除")
     btnDelGrp.OnEvent("Click", (*) => DeleteActiveGroup())
     
-    ; 動態多欄頁籤矩陣繪製 (3欄矩陣, 使用 Text +0x200 解放彩色 Emoji 渲染)
-    GroupTabCtrls := []
-    MakeGroupTabClickFn(tabIdx) {
-        return (*) => SwitchActiveGroup(tabIdx)
-    }
-    
-    colCount := 3
-    startX := 15, startY := 38
-    tabW := 136, tabH := 36, gapX := 7, gapY := 6
-    
-    for idx, grp in MacroGroups {
-        col := Mod(idx - 1, colCount)
-        row := (idx - 1) // colCount
-        
-        tX := startX + col * (tabW + gapX)
-        tY := startY + row * (tabH + gapY)
-        
-        isVis := !grp.HasOwnProp("visible") || grp.visible
-        visTag := isVis ? "" : " 🙈"
-        
-        tabStyle := (idx == ActiveEditGroupIdx) ? "Background0x008800 c0x00FFFF" : (isVis ? "Background0x252525 cWhite" : "Background0x252525 c0x888888")
-        btn := MacroEditGui.Add("Text", "x" tX " y" tY " w" tabW " h" tabH " Center +0x200 " tabStyle, grp.icon " " grp.name . visTag)
-        btn.OnEvent("Click", MakeGroupTabClickFn(idx))
-        
-        GroupTabCtrls.Push({ ctrl: btn, idx: idx })
-    }
-    
-    ; 計算頁籤區域高度並擺放步驟 ListView (雙擊可再次編輯步驟)
-    maxRow := (MacroGroups.Length > 0) ? ((MacroGroups.Length - 1) // colCount) : 0
-    lvY := Max(85, startY + (maxRow + 1) * (tabH + gapY) + 6)
-    
-    MacroEditGui.SetFont("s10 bold cWhite", "Microsoft JhengHei")
-    MacroLV := MacroEditGui.Add("ListView", "x15 y" lvY " w580 h215 Background0x1E1E1E cWhite +Grid -Multi", ["序號", "動作類型", "詳細內容", "執行參數"])
+    ; 中間：步驟清單 ListView
+    lvY := 52
+    MacroLV := MacroEditGui.Add("ListView", "x15 y" lvY " w580 h240 Background0x1E1E1E cWhite +Grid -Multi", ["序號", "動作類型", "詳細內容", "執行參數"])
     MacroLV.ModifyCol(1, 50)
     MacroLV.ModifyCol(2, 130)
     MacroLV.ModifyCol(3, 250)
@@ -393,38 +662,41 @@ ToggleMacroEditGui() {
     RefreshMacroListView()
     
     ; 動作按鈕列
-    actY := lvY + 223
-    btnAddColor := MacroEditGui.Add("Button", "x15 y" actY " w125 h35 Background0x282828", "🎯 圈選顏色")
+    actY := lvY + 248
+    btnAddColor := MacroEditGui.Add("Button", "x15 y" actY " w105 h35 Background0x282828", "🎯 圈選顏色")
     btnAddColor.OnEvent("Click", (*) => PromptAddColorDetect())
     
-    btnAddWait := MacroEditGui.Add("Button", "x145 y" actY " w105 h35 Background0x282828", "⏱ +等待")
+    btnAddKey := MacroEditGui.Add("Button", "x125 y" actY " w90 h35 Background0x282828", "⌨️ +按鍵")
+    btnAddKey.OnEvent("Click", (*) => PromptAddKeyPress())
+    
+    btnAddWait := MacroEditGui.Add("Button", "x220 y" actY " w85 h35 Background0x282828", "⏱ +等待")
     btnAddWait.OnEvent("Click", (*) => PromptAddWait())
     
-    btnAddLoopGoto := MacroEditGui.Add("Button", "x255 y" actY " w105 h35 Background0x282828", "🔁 +步驟循環")
+    btnAddLoopGoto := MacroEditGui.Add("Button", "x310 y" actY " w100 h35 Background0x282828", "🔁 +步驟循環")
     btnAddLoopGoto.OnEvent("Click", (*) => PromptAddLoopGoto())
     
-    btnEditStep := MacroEditGui.Add("Button", "x365 y" actY " w65 h35 Background0x006699", "✏ 編輯")
+    btnEditStep := MacroEditGui.Add("Button", "x415 y" actY " w60 h35 Background0x006699", "✏ 編輯")
     btnEditStep.OnEvent("Click", (*) => EditSelectedStep())
     
-    btnDelStep := MacroEditGui.Add("Button", "x435 y" actY " w60 h35 Background0x882222", "🗑 刪除")
+    btnDelStep := MacroEditGui.Add("Button", "x480 y" actY " w55 h35 Background0x882222", "🗑 刪除")
     btnDelStep.OnEvent("Click", (*) => DeleteSelectedStep())
     
-    btnUp := MacroEditGui.Add("Button", "x505 y" actY " w40 h35", "▲")
+    btnUp := MacroEditGui.Add("Button", "x540 y" actY " w32 h35", "▲")
     btnUp.OnEvent("Click", (*) => MoveStep(-1))
     
-    btnDown := MacroEditGui.Add("Button", "x550 y" actY " w45 h35", "▼")
+    btnDown := MacroEditGui.Add("Button", "x575 y" actY " w32 h35", "▼")
     btnDown.OnEvent("Click", (*) => MoveStep(1))
     
-    ; 底部：當前群組循環數 Slider 與 匯入/匯出/儲存按鈕
+    ; 底部：當前群組循環數 Slider (最左邊 0 為無限次) 與 匯入/匯出/儲存按鈕
     botY := actY + 45
     curLoop := (ActiveEditGroupIdx <= MacroGroups.Length) ? MacroGroups[ActiveEditGroupIdx].loopCount : 1
     
     MacroEditGui.Add("Text", "x15 y" (botY + 5) " w120 h25 cWhite", "🔁 當前群組循環數:")
-    LoopCountLabel := MacroEditGui.Add("Text", "x138 y" (botY + 5) " w55 h25 c0x00FFFF", curLoop . " 次")
-    LoopCountSlider := MacroEditGui.Add("Slider", "x195 y" botY " w160 h30 Range1-999 +AltSubmit ToolTip", curLoop)
+    LoopCountLabel := MacroEditGui.Add("Text", "x138 y" (botY + 5) " w75 h25 c0x00FFFF", (curLoop == 0 ? "無限次 (∞)" : curLoop . " 次"))
+    LoopCountSlider := MacroEditGui.Add("Slider", "x215 y" botY " w140 h30 Range0-999 Thick20 Tooltip AltSubmit", curLoop)
     LoopCountSlider.OnEvent("Change", (ctrl, *) => (
         (ActiveEditGroupIdx <= MacroGroups.Length) ? (MacroGroups[ActiveEditGroupIdx].loopCount := ctrl.Value) : 0,
-        LoopCountLabel.Value := ctrl.Value . " 次"
+        LoopCountLabel.Value := (ctrl.Value == 0 ? "無限次 (∞)" : ctrl.Value . " 次")
     ))
     
     btnImport := MacroEditGui.Add("Button", "x365 y" botY " w70 h35 Background0x282828", "📥 匯入")
@@ -453,33 +725,25 @@ RebuildMacroEditGui() {
 }
 
 SwitchActiveGroup(idx) {
-    global ActiveEditGroupIdx, MacroGroups, GroupTabCtrls, LoopCountSlider, LoopCountLabel
+    global ActiveEditGroupIdx, MacroGroups, DDLGroupSelect, LoopCountSlider, LoopCountLabel
     if (idx > 0 && idx <= MacroGroups.Length) {
         ActiveEditGroupIdx := idx
         
-        for item in GroupTabCtrls {
-            grpObj := MacroGroups[item.idx]
-            isVis := !grpObj.HasOwnProp("visible") || grpObj.visible
-            if (item.idx == ActiveEditGroupIdx) {
-                item.ctrl.Opt("+Background0x008800 +c0x00FFFF")
-            } else {
-                if (isVis)
-                    item.ctrl.Opt("+Background0x252525 +cWhite")
-                else
-                    item.ctrl.Opt("+Background0x252525 +c0x888888")
-            }
+        if (DDLGroupSelect) {
+            try DDLGroupSelect.Choose(idx)
         }
         
         RefreshMacroListView()
         if (LoopCountSlider) {
-            LoopCountSlider.Value := MacroGroups[idx].loopCount
-            LoopCountLabel.Value := MacroGroups[idx].loopCount . " 次"
+            cnt := MacroGroups[idx].loopCount
+            LoopCountSlider.Value := cnt
+            LoopCountLabel.Value := (cnt == 0 ? "無限次 (∞)" : cnt . " 次")
         }
     }
 }
 
 ; =================================================================
-; [圖示選擇網格 Modal (Grid Picker)]
+; [圖示與群組設定 Modal (使用下拉選單挑選圖示)]
 ; =================================================================
 PromptAddGroup() {
     global MacroGroups, ActiveEditGroupIdx, IconPresets
@@ -524,69 +788,36 @@ ShowGroupDialog(titleText, defaultName, defaultIcon, defaultVisible, callback) {
     dlg.BackColor := "0x1A1A1A"
     dlg.SetFont("s10 bold cWhite", "Microsoft JhengHei")
     
-    dlg.Add("Text", "x20 y15 w90 h25 cWhite", "群組名稱:")
-    nameEdit := dlg.Add("Edit", "x110 y12 w265 h26 Background0x2A2A2A c0x00FFFF", defaultName)
+    dlg.Add("Text", "x20 y18 w85 h25 cWhite", "群組名稱:")
+    nameEdit := dlg.Add("Edit", "x110 y15 w255 h26 Background0x2A2A2A c0x00FFFF", defaultName)
     
-    selectedIcon := defaultIcon
-    dlg.Add("Text", "x20 y52 w90 h25 cWhite", "選擇圖示:")
+    ; 圖示下拉選單
+    dlg.Add("Text", "x20 y56 w85 h25 cWhite", "選擇圖示:")
     
-    dlg.SetFont("s11 bold cWhite", "Segoe UI Emoji")
-    selTextCtrl := dlg.Add("Text", "x110 y52 w265 h25 c0x00FFFF", "當前點選: " . selectedIcon)
-    
-    ; 繪製 4 列 x 5 行 彩色圖示選擇按鈕網格 (使用 Text +0x200 控制項解封彩色 Emoji 渲染)
-    iconBtnItems := []
-    colCount := 5
-    startX := 20, startY := 82
-    btnW := 67, btnH := 36, gapX := 7, gapY := 7
-    
-    MakeIconClickFn(icVal) {
-        return (*) => (
-            selectedIcon := icVal,
-            selTextCtrl.Value := "當前點選: " . selectedIcon,
-            UpdateIconGridSelection(iconBtnItems, selectedIcon)
-        )
-    }
-    
-    dlg.SetFont("s13 bold cWhite", "Segoe UI Emoji")
+    iconIdx := 1
     for idx, ic in IconPresets {
-        col := Mod(idx - 1, colCount)
-        row := (idx - 1) // colCount
-        
-        btnX := startX + col * (btnW + gapX)
-        btnY := startY + row * (btnH + gapY)
-        
-        btnText := (ic == selectedIcon) ? "✔ " . ic : ic
-        btnStyle := (ic == selectedIcon) ? "Background0x008800 c0x00FFFF" : "Background0x282828 cWhite"
-        btn := dlg.Add("Text", "x" btnX " y" btnY " w" btnW " h" btnH " Center +0x200 " btnStyle, btnText)
-        
-        btn.OnEvent("Click", MakeIconClickFn(ic))
-        iconBtnItems.Push({ ctrl: btn, icon: ic })
-    }
-    
-    UpdateIconGridSelection(btnList, targetIcon) {
-        for item in btnList {
-            if (item.icon == targetIcon) {
-                item.ctrl.Value := "✔ " . item.icon
-                item.ctrl.Opt("+Background0x008800 +c0x00FFFF")
-            } else {
-                item.ctrl.Value := item.icon
-                item.ctrl.Opt("+Background0x282828 +cWhite")
-            }
+        if (ic == defaultIcon) {
+            iconIdx := idx
+            break
         }
     }
     
-    dlg.SetFont("s10 bold cWhite", "Microsoft JhengHei")
-    cbVisible := dlg.AddCheckBox("x20 y260 w363 h25 " . (defaultVisible ? "Checked" : ""), "👁 顯示於主懸浮列 (取消勾選則隱藏此群組按鈕)")
+    dlg.SetFont("s12 bold cWhite", "Segoe UI Emoji")
+    ddlIcon := dlg.Add("DropDownList", "x110 y52 w255 Background0x2A2A2A c0x00FFFF Choose" . iconIdx, IconPresets)
     
-    btnOK := dlg.Add("Button", "x20 y295 w363 h38 Background0x008800", "確認儲存設定")
+    dlg.SetFont("s10 bold cWhite", "Microsoft JhengHei")
+    cbVisible := dlg.AddCheckBox("x20 y94 w345 h25 " . (defaultVisible ? "Checked" : ""), "👁 顯示於主懸浮列 (取消勾選則隱藏此群組按鈕)")
+    
+    btnOK := dlg.Add("Button", "x20 y130 w345 h36 Background0x008800", "確認儲存設定")
     btnOK.OnEvent("Click", (*) => (
         finalName := Trim(nameEdit.Value) != "" ? Trim(nameEdit.Value) : "巨集群組",
+        finalIcon := ddlIcon.Text != "" ? ddlIcon.Text : "⚔️",
         finalVis := cbVisible.Value ? 1 : 0,
         dlg.Destroy(),
-        callback.Call(finalName, selectedIcon, finalVis)
+        callback.Call(finalName, finalIcon, finalVis)
     ))
     
-    dlg.Show("w403 h350")
+    dlg.Show("w385 h180")
 }
 
 DeleteActiveGroup() {
@@ -623,18 +854,29 @@ RefreshMacroListView() {
             toMode := step.HasOwnProp("timeoutMode") ? step.timeoutMode : 1
             jpStep := step.HasOwnProp("jumpStep") ? step.jumpStep : 1
             
+            hMs := (hMin * 60 + hSec) * 1000
+            hStr := (hMs > 0) ? ("(" . FormatDurationText(hMs) . ")") : ""
+            
             actTitle := "🎨 顏色偵測" . (invVal ? " (反向)" : "")
-            aStr := (aType == 0) ? "點擊" : ((aType == 1) ? Format("按鍵'{}'({}分{}秒)", pKey, hMin, hSec) : Format("點擊+按鍵'{}'({}分{}秒)", pKey, hMin, hSec))
+            aStr := (aType == 0) ? "點擊" : ((aType == 1) ? Format("按鍵'{}'{}", pKey, hStr) : Format("點擊+按鍵'{}'{}", pKey, hStr))
             toModeStr := (toMode == 0) ? "重試" : ((toMode == 1) ? "下一步" : ("返回第" jpStep "步"))
             toInfo := (toSec > 0) ? Format(" | ⏱逾時:{}s[{}]", toSec, toModeStr) : ""
             paramText := Format("動作:{} | 色:{} | 容:{}", aStr, step.color, tolVal) . (invVal ? " | 🚫反向" : "") . toInfo
             MacroLV.Add("", idx, actTitle, "區域: (" step.x "," step.y " W:" step.w " H:" step.h ")", paramText)
+        } else if (step.type == "key_press") {
+            repCount := step.HasOwnProp("repeat") ? step.repeat : 1
+            repStr := (repCount == 0) ? "無限" : repCount
+            repInfo := (repCount == 1) ? "" : Format(" (重複 {} 次)", repStr)
+            hStr := FormatDurationText(step.holdMs)
+            dStr := (step.delayMs > 0) ? (" | 延遲 " . FormatDurationText(step.delayMs)) : ""
+            MacroLV.Add("", idx, "⌨️ 按鍵發送", Format("按鍵: {}{}", step.key, repInfo), Format("按住: {}{}", hStr, dStr))
         } else if (step.type == "wait") {
-            MacroLV.Add("", idx, "⏱ 等待秒數", "純等待延遲", (step.waitMs/1000) " 秒")
+            MacroLV.Add("", idx, "⏱ 等待秒數", "純等待延遲", FormatDurationText(step.waitMs))
         } else if (step.type == "loop_goto") {
             targetS := step.HasOwnProp("targetStep") ? step.targetStep : 1
             maxL := step.HasOwnProp("maxLoops") ? step.maxLoops : 1
-            MacroLV.Add("", idx, "🔁 步驟循環控制", Format("返回第 {} 步", targetS), Format("循環 {} 次後繼續下一步", maxL))
+            lStr := (maxL == 0) ? "無限次循環返回" : Format("循環 {} 次後推進下一步", maxL)
+            MacroLV.Add("", idx, "🔁 步驟循環控制", Format("返回第 {} 步", targetS), lStr)
         }
     }
 }
@@ -682,6 +924,8 @@ EditSelectedStep() {
         step := steps[row]
         if (step.type == "color_detect") {
             PromptEditColorDetect(step)
+        } else if (step.type == "key_press") {
+            PromptEditKeyPress(step)
         } else if (step.type == "wait") {
             PromptEditWait(step)
         } else if (step.type == "loop_goto") {
@@ -693,7 +937,7 @@ EditSelectedStep() {
 }
 
 ; =================================================================
-; [動作 1：畫面圈選 + 主色偵測 + 編輯/測試 (置頂高對比橫幅說明，免彈窗)]
+; [動作 1：畫面圈選 + 主色偵測 + 編輯/測試]
 ; =================================================================
 PromptAddColorDetect() {
     SelectScreenRegion((x, y, w, h) => ProcessColorSelection(x, y, w, h))
@@ -707,7 +951,6 @@ SelectScreenRegion(callback) {
     overlayGui.BackColor := "000000"
     WinSetTransparent(45, overlayGui.Hwnd)
     
-    ; 頂部中央高對比醒目操作說明告示牌 (100% 清楚可見、絕不會被遮擋)
     tipW := 520, tipH := 42
     tipX := Integer((A_ScreenWidth - tipW) / 2)
     tipBanner := overlayGui.Add("Text", Format("x{} y30 w{} h{} Center +0x200 Background0x008800 cWhite", tipX, tipW, tipH), "🎯 請在畫面上按住滑鼠左鍵【拖曳圈選】目標區域 (Esc 取消)")
@@ -794,7 +1037,7 @@ ProcessColorSelection(x, y, w, h) {
 GetDominantColor(x, y, w, h) {
     CoordMode("Pixel", "Screen")
     CoordMode("Mouse", "Screen")
-    Sleep(80) ; 充足等待 DWM 解除透光與畫框銷毀，徹底擺脫白色選框殘影噪訊！
+    Sleep(80)
     
     colorCounts := Map()
     stepX := Max(1, Floor(w / 12))
@@ -829,11 +1072,121 @@ GetDominantColor(x, y, w, h) {
     return (dominantNonPureColor != "") ? dominantNonPureColor : dominantColor
 }
 
-; === 顏色偵測編輯與即時自動測試視窗 (連動 IsAlwaysOnTop 切換) ===
+; =================================================================
+; [通用按鍵分類與選擇下拉選單建立 Helper]
+; =================================================================
+AttachKeyCategoryPicker(dlg, startY, defaultKey, allowEmpty := false) {
+    global KeyCategories
+    
+    allKeysList := []
+    if (allowEmpty)
+        allKeysList.Push("(無)")
+    for catName, keyArr in KeyCategories {
+        for k in keyArr
+            allKeysList.Push(k)
+    }
+    
+    catNamesList := ["📋 全部按鍵清單"]
+    for catName, _ in KeyCategories
+        catNamesList.Push(catName)
+        
+    initKey := (defaultKey == "" && allowEmpty) ? "(無)" : (defaultKey != "" ? defaultKey : (allowEmpty ? "(無)" : "Space"))
+    initCatIdx := 1
+    for cIdx, cName in catNamesList {
+        if (cIdx > 1 && KeyCategories.Has(cName)) {
+            for k in KeyCategories[cName] {
+                if (StrLower(k) == StrLower(initKey)) {
+                    initCatIdx := cIdx
+                    break 2
+                }
+            }
+        }
+    }
+    
+    dlg.Add("Text", "x25 y" (startY + 3) " w70 h20 cWhite", "按鍵分類:")
+    ddlCat := dlg.Add("DropDownList", "x95 y" startY " w245 Background0x2A2A2A c0x00FFFF Choose" . initCatIdx, catNamesList)
+    
+    dlg.Add("Text", "x25 y" (startY + 33) " w70 h20 cWhite", "選擇按鍵:")
+    ddlKeys := dlg.Add("DropDownList", "x95 y" (startY + 30) " w145 Background0x2A2A2A c0x00FFFF", ["Space"])
+    dlg.Add("Text", "x245 y" (startY + 33) " w35 h20 c0x888888", "自訂:")
+    editKey := dlg.Add("Edit", "x280 y" (startY + 30) " w60 h24 Background0x2A2A2A c0x00FFFF Center", initKey)
+    
+    UpdateKeyList(selectedCatName, selectKey := "") {
+        keysToShow := []
+        if (allowEmpty && selectedCatName == "📋 全部按鍵清單")
+            keysToShow.Push("(無)")
+        if (selectedCatName == "📋 全部按鍵清單") {
+            for catName, keyArr in KeyCategories {
+                for k in keyArr
+                    keysToShow.Push(k)
+            }
+        } else if KeyCategories.Has(selectedCatName) {
+            keysToShow := KeyCategories[selectedCatName]
+        }
+        ddlKeys.Delete()
+        ddlKeys.Add(keysToShow)
+        
+        targetK := (selectKey != "") ? selectKey : editKey.Value
+        matchedIdx := 0
+        for idx, k in keysToShow {
+            if (StrLower(k) == StrLower(targetK)) {
+                matchedIdx := idx
+                break
+            }
+        }
+        if (matchedIdx > 0)
+            ddlKeys.Choose(matchedIdx)
+        else
+            ddlKeys.Choose(1)
+    }
+    
+    UpdateKeyList(catNamesList[initCatIdx], initKey)
+    
+    ddlCat.OnEvent("Change", (ctrl, *) => UpdateKeyList(ctrl.Text, editKey.Value))
+    ddlKeys.OnEvent("Change", (ctrl, *) => (editKey.Value := ctrl.Text))
+    
+    editKey.OnEvent("Change", (ctrl, *) => (
+        kVal := Trim(ctrl.Value),
+        UpdateCategoryFromKey(kVal)
+    ))
+    
+    UpdateCategoryFromKey(kVal) {
+        if (kVal == "" || kVal == "(無)")
+            return
+        matchedCat := ""
+        for cName, keyArr in KeyCategories {
+            for k in keyArr {
+                if (StrLower(k) == StrLower(kVal)) {
+                    matchedCat := cName
+                    break 2
+                }
+            }
+        }
+        if (matchedCat != "") {
+            for cIdx, cName in catNamesList {
+                if (cName == matchedCat) {
+                    if (ddlCat.Value != cIdx) {
+                        ddlCat.Choose(cIdx)
+                        UpdateKeyList(cName, kVal)
+                    }
+                    break
+                }
+            }
+        }
+    }
+    
+    return {
+        ddlCat: ddlCat,
+        ddlKeys: ddlKeys,
+        editKey: editKey,
+        GetValue: (params*) => (editKey.Value == "(無)" ? "" : Trim(editKey.Value))
+    }
+}
+
+; === 顏色偵測編輯與即時自動測試視窗 ===
 PromptEditColorDetect(step) {
     global MacroEditGui, MyGui, ActiveBoxGuiHwnd, ActiveColorEditCtrlDlg, IsAlwaysOnTop, MacroGroups, ActiveEditGroupIdx
     
-    ; 唯一性單一編輯視窗機制：若已有顏色編輯測試視窗開啟，直接聚焦該視窗！
     if (ActiveColorEditCtrlDlg != "") {
         try {
             if WinExist("ahk_id " . ActiveColorEditCtrlDlg.Hwnd) {
@@ -861,7 +1214,6 @@ PromptEditColorDetect(step) {
     maxSteps := (ActiveEditGroupIdx <= MacroGroups.Length) ? Max(1, MacroGroups[ActiveEditGroupIdx].steps.Length) : 1
     curJumpStep := step.HasOwnProp("jumpStep") ? Min(maxSteps, Max(1, step.jumpStep)) : 1
     
-    ; 1. 建立 100% 乾淨極簡純水藍標記框
     boxGui := Gui("+AlwaysOnTop -Caption -Border +ToolWindow")
     boxGui.BackColor := "0x00FFFF"
     WinSetTransparent(120, boxGui.Hwnd)
@@ -869,7 +1221,6 @@ PromptEditColorDetect(step) {
     ActiveBoxGuiHwnd := boxGui.Hwnd
     ShowBoxGui(boxGui, curX, curY, curW, curH)
     
-    ; 2. 建立編輯控制與測試 Modal 對話框 (+Owner 關聯至主編輯視窗)
     ownerHwnd := GetMacroEditGuiHwnd()
     ownerOpt := (ownerHwnd > 0) ? (" +Owner" . ownerHwnd) : ""
     
@@ -881,100 +1232,95 @@ PromptEditColorDetect(step) {
     ; 頂部超大醒目狀態告示牌
     statusHeaderBar := ctrlDlg.Add("Text", "x15 y10 w350 h32 Center +0x200 Background0x333333 cWhite", "[ ⏳ 請移動或調整區域進行自動檢測 ]")
     
-    ; 第二行：目標顏色預覽 (左側 35px 寬純色色票區) 與 右側可自行輸入/修改的 HEX 顏色輸入框 (Edit)
-    ctrlDlg.Add("Text", "x15 y48 w75 h25 cWhite", "目標顏色:")
-    cleanClr := RegExReplace(targetColor, "^0[xX]")
-    colorPreview := ctrlDlg.Add("Text", "x90 y48 w35 h25 Background" . cleanClr, "")
-    editColor := ctrlDlg.Add("Edit", "x132 y46 w110 h26 Background0x2A2A2A c0x00FFFF Uppercase", targetColor)
-    ctrlDlg.Add("Text", "x248 y48 w120 h22 c0x888888", "(可自訂HEX)")
+    ; 第二行：目標顏色預覽與採樣按鈕
+    ctrlDlg.Add("Text", "x15 y48 w70 h25 cWhite", "目標顏色:")
+    cleanClr := GetFirstHexColor(targetColor)
+    colorPreview := ctrlDlg.Add("Text", "x85 y48 w32 h25 Background" . cleanClr, "")
+    editColor := ctrlDlg.Add("Edit", "x122 y46 w95 h26 Background0x2A2A2A c0x00FFFF Uppercase", targetColor)
     
     SetSwatchColor(hexStr) {
-        cHex := RegExReplace(hexStr, "^0[xX]")
-        if (StrLen(cHex) == 6) {
-            try {
-                colorPreview.Opt("Background" . cHex)
-                colorPreview.Redraw()
-            }
+        cHex := GetFirstHexColor(hexStr)
+        try {
+            colorPreview.Opt("Background" . cHex)
+            colorPreview.Redraw()
         }
     }
     
-    ; 第三行：精準像素數值編輯輸入框 (X, Y, W, H 可直接修改並自動觸發檢測)
-    ctrlDlg.Add("Text", "x15 y80 w18 h22 cWhite", "X:")
-    editX := ctrlDlg.Add("Edit", "x33 y77 w52 h24 Background0x2A2A2A c0x00FFFF Number", curX)
+    btnSample := ctrlDlg.Add("Button", "x222 y44 w68 h28 Background0x282828", "🎯 採樣")
+    btnRedraw := ctrlDlg.Add("Button", "x295 y44 w70 h28 Background0x282828", "🖱 重畫")
     
-    ctrlDlg.Add("Text", "x90 y80 w18 h22 cWhite", "Y:")
-    editY := ctrlDlg.Add("Edit", "x108 y77 w52 h24 Background0x2A2A2A c0x00FFFF Number", curY)
+    ; 區域像素座標拉桿 (X, Y, W, H 全面改為拉桿)
+    ctrlDlg.Add("Text", "x15 y78 w65 h20 cWhite", "位置 X:")
+    lblX := ctrlDlg.Add("Text", "x80 y78 w65 h20 c0x00FFFF", curX " px")
+    sldX := ctrlDlg.Add("Slider", "x145 y76 w220 h24 Range0-" A_ScreenWidth " Thick20 Tooltip AltSubmit", curX)
     
-    ctrlDlg.Add("Text", "x165 y80 w22 h22 cWhite", "W:")
-    editW := ctrlDlg.Add("Edit", "x187 y77 w52 h24 Background0x2A2A2A c0x00FFFF Number", curW)
+    ctrlDlg.Add("Text", "x15 y104 w65 h20 cWhite", "位置 Y:")
+    lblY := ctrlDlg.Add("Text", "x80 y104 w65 h20 c0x00FFFF", curY " px")
+    sldY := ctrlDlg.Add("Slider", "x145 y102 w220 h24 Range0-" A_ScreenHeight " Thick20 Tooltip AltSubmit", curY)
     
-    ctrlDlg.Add("Text", "x244 y80 w20 h22 cWhite", "H:")
-    editH := ctrlDlg.Add("Edit", "x264 y77 w52 h24 Background0x2A2A2A c0x00FFFF Number", curH)
+    ctrlDlg.Add("Text", "x15 y130 w65 h20 cWhite", "寬度 W:")
+    lblW := ctrlDlg.Add("Text", "x80 y130 w65 h20 c0x00FFFF", curW " px")
+    sldW := ctrlDlg.Add("Slider", "x145 y128 w220 h24 Range4-" A_ScreenWidth " Thick20 Tooltip AltSubmit", curW)
     
-    ; 第四行：顏色容許值 (Tolerance) 拉桿
-    ctrlDlg.Add("Text", "x15 y114 w65 h25 cWhite", "容許值:")
-    lblTolerance := ctrlDlg.Add("Text", "x85 y114 w55 h25 c0x00FFFF", curTolerance)
-    sldTolerance := ctrlDlg.Add("Slider", "x145 y112 w220 h30 Range0-100 +AltSubmit ToolTip", curTolerance)
+    ctrlDlg.Add("Text", "x15 y156 w65 h20 cWhite", "高度 H:")
+    lblH := ctrlDlg.Add("Text", "x80 y156 w65 h20 c0x00FFFF", curH " px")
+    sldH := ctrlDlg.Add("Slider", "x145 y154 w220 h24 Range4-" A_ScreenHeight " Thick20 Tooltip AltSubmit", curH)
     
-    ; 第五行：🚫 反向未發現才點擊 CheckBox
-    cbInvert := ctrlDlg.AddCheckBox("x15 y146 w350 h25 " . (curInvert ? "Checked" : ""), "🚫 反向檢測 (畫面上未發現該顏色時才點擊)")
+    ; 顏色容許值拉桿
+    ctrlDlg.Add("Text", "x15 y182 w65 h20 cWhite", "容許值:")
+    lblTolerance := ctrlDlg.Add("Text", "x80 y182 w65 h20 c0x00FFFF", curTolerance)
+    sldTolerance := ctrlDlg.Add("Slider", "x145 y180 w220 h24 Range0-100 Thick20 Tooltip AltSubmit", curTolerance)
     
-    ; === 🎯 偵測成功觸發處置 (點擊 / 按鍵與 0-60分/0-60秒雙拉桿) ===
+    ; 🚫 反向未發現才點擊 CheckBox
+    cbInvert := ctrlDlg.AddCheckBox("x15 y208 w350 h24 " . (curInvert ? "Checked" : ""), "🚫 反向檢測 (畫面上未發現該顏色時才點擊)")
+    
+    ; === 🎯 偵測成功觸發處置 ===
     ctrlDlg.SetFont("s9 bold c0x00FFFF", "Segoe UI")
-    ctrlDlg.Add("GroupBox", "x15 y175 w350 h145 c0x00FFFF", "🎯 偵測成功觸發處置 (點擊 / 按鍵與按住拉桿)")
+    ctrlDlg.Add("GroupBox", "x15 y235 w350 h155 c0x00FFFF", "🎯 偵測成功觸發處置 (點擊 / 按鍵與按住拉桿)")
     ctrlDlg.SetFont("s9 bold cWhite", "Microsoft JhengHei")
     
     GetActionText(v) => (v == 0) ? "0: 僅點擊中心點" : ((v == 1) ? "1: 僅按鍵按住" : "2: 點擊 + 按鍵")
-    ctrlDlg.Add("Text", "x25 y196 w70 h20 cWhite", "觸發動作:")
-    lblActionType := ctrlDlg.Add("Text", "x95 y196 w100 h20 c0x00FFFF", GetActionText(curActionType))
-    sldActionType := ctrlDlg.Add("Slider", "x195 y194 w160 h24 Range0-2 +AltSubmit ToolTip", curActionType)
+    ctrlDlg.Add("Text", "x25 y255 w70 h20 cWhite", "觸發動作:")
+    lblActionType := ctrlDlg.Add("Text", "x95 y255 w100 h20 c0x00FFFF", GetActionText(curActionType))
+    sldActionType := ctrlDlg.Add("Slider", "x195 y253 w160 h24 Range0-2 Thick20 Tooltip AltSubmit", curActionType)
     sldActionType.OnEvent("Change", (ctrl, *) => (
         lblActionType.Value := GetActionText(ctrl.Value)
     ))
     
-    ctrlDlg.Add("Text", "x25 y226 w90 h20 cWhite", "觸發發送按鍵:")
-    editPressKey := ctrlDlg.Add("Edit", "x120 y223 w65 h24 Background0x2A2A2A c0x00FFFF Center", curPressKey)
-    ctrlDlg.Add("Text", "x190 y226 w165 h20 c0x888888", "(如 Space/Enter/F1)")
+    pressPicker := AttachKeyCategoryPicker(ctrlDlg, 282, curPressKey, false)
     
-    ctrlDlg.Add("Text", "x25 y256 w90 h20 cWhite", "按住時間(分):")
-    lblHoldMin := ctrlDlg.Add("Text", "x120 y256 w70 h20 c0x00FFFF", curHoldMin " 分鐘")
-    sldHoldMin := ctrlDlg.Add("Slider", "x195 y254 w160 h24 Range0-60 +AltSubmit ToolTip", curHoldMin)
-    sldHoldMin.OnEvent("Change", (ctrl, *) => (
-        lblHoldMin.Value := ctrl.Value " 分鐘"
+    curHoldTotalMs := (curHoldMin * 60 + curHoldSec) * 1000
+    ctrlDlg.Add("Text", "x25 y344 w70 h20 cWhite", "按住時間:")
+    lblHoldTime := ctrlDlg.Add("Text", "x95 y344 w160 h20 c0x00FFFF", FormatDurationText(curHoldTotalMs))
+    sldHoldTime := ctrlDlg.Add("Slider", "x25 y364 w330 h24 Range1-" TimeStepTable.Length " Thick20 Tooltip AltSubmit", MsToTimeStep(curHoldTotalMs))
+    sldHoldTime.OnEvent("Change", (ctrl, *) => (
+        lblHoldTime.Value := FormatDurationText(TimeStepToMs(ctrl.Value))
     ))
     
-    ctrlDlg.Add("Text", "x25 y286 w90 h20 cWhite", "按住時間(秒):")
-    lblHoldSec := ctrlDlg.Add("Text", "x120 y286 w70 h20 c0x00FFFF", curHoldSec " 秒")
-    sldHoldSec := ctrlDlg.Add("Slider", "x195 y284 w160 h24 Range0-60 +AltSubmit ToolTip", curHoldSec)
-    sldHoldSec.OnEvent("Change", (ctrl, *) => (
-        lblHoldSec.Value := ctrl.Value " 秒"
-    ))
-    
-    ; === ⏰ 逾時動作與轉向控制區 (全拉桿控制 + 現有序號讀取) ===
+    ; === ⏰ 逾時動作與轉向控制區 ===
     ctrlDlg.SetFont("s9 bold c0x00FFFF", "Segoe UI")
-    ctrlDlg.Add("GroupBox", "x15 y328 w350 h145 c0x00FFFF", "⏰ 逾時處置與轉向設定 (拉桿控制)")
+    ctrlDlg.Add("GroupBox", "x15 y398 w350 h195 c0x00FFFF", "⏰ 逾時處置與轉向設定 (拉桿控制)")
     ctrlDlg.SetFont("s9 bold cWhite", "Microsoft JhengHei")
     
-    ctrlDlg.Add("Text", "x25 y348 w70 h20 cWhite", "逾時時間:")
-    lblTimeoutSec := ctrlDlg.Add("Text", "x95 y348 w100 h20 c0x00FFFF", (curTimeoutSec == 0 ? "0 秒 (不逾時)" : curTimeoutSec " 秒"))
-    sldTimeoutSec := ctrlDlg.Add("Slider", "x195 y346 w160 h24 Range0-300 +AltSubmit ToolTip", curTimeoutSec)
+    curTimeoutMs := curTimeoutSec * 1000
+    ctrlDlg.Add("Text", "x25 y416 w70 h20 cWhite", "逾時時間:")
+    lblTimeoutSec := ctrlDlg.Add("Text", "x95 y416 w160 h20 c0x00FFFF", (curTimeoutSec == 0 ? "0毫秒 (不逾時)" : FormatDurationText(curTimeoutMs)))
+    sldTimeoutSec := ctrlDlg.Add("Slider", "x25 y436 w330 h24 Range1-" TimeStepTable.Length " Thick20 Tooltip AltSubmit", MsToTimeStep(curTimeoutMs))
     sldTimeoutSec.OnEvent("Change", (ctrl, *) => (
-        lblTimeoutSec.Value := (ctrl.Value == 0) ? "0 秒 (不逾時)" : ctrl.Value " 秒"
+        lblTimeoutSec.Value := (ctrl.Value == 1 ? "0毫秒 (不逾時)" : FormatDurationText(TimeStepToMs(ctrl.Value)))
     ))
     
-    ctrlDlg.Add("Text", "x25 y378 w90 h20 cWhite", "逾時發送按鍵:")
-    editTimeoutKey := ctrlDlg.Add("Edit", "x120 y375 w65 h24 Background0x2A2A2A c0x00FFFF Center", curTimeoutKey)
-    ctrlDlg.Add("Text", "x190 y378 w165 h20 c0x888888", "(如 Esc / Space / 空白免按)")
+    timeoutPicker := AttachKeyCategoryPicker(ctrlDlg, 464, curTimeoutKey, true)
     
     GetModeText(v, jP) => (v == 0) ? "0: 重試本步驟" : ((v == 1) ? "1: 推進下一步" : ("2: 返回第 " jP " 步"))
     
-    ctrlDlg.Add("Text", "x25 y408 w70 h20 cWhite", "處置模式:")
-    lblTimeoutMode := ctrlDlg.Add("Text", "x95 y408 w100 h20 c0x00FFFF", GetModeText(curTimeoutMode, curJumpStep))
-    sldTimeoutMode := ctrlDlg.Add("Slider", "x195 y406 w160 h24 Range0-2 +AltSubmit ToolTip", curTimeoutMode)
+    ctrlDlg.Add("Text", "x25 y528 w70 h20 cWhite", "處置模式:")
+    lblTimeoutMode := ctrlDlg.Add("Text", "x95 y528 w100 h20 c0x00FFFF", GetModeText(curTimeoutMode, curJumpStep))
+    sldTimeoutMode := ctrlDlg.Add("Slider", "x195 y526 w160 h24 Range0-2 Thick20 Tooltip AltSubmit", curTimeoutMode)
     
-    ctrlDlg.Add("Text", "x25 y438 w70 h20 cWhite", "返回步驟號:")
-    lblJumpStep := ctrlDlg.Add("Text", "x95 y438 w100 h20 c0x00FFFF", "第 " curJumpStep " 步")
-    sldJumpStep := ctrlDlg.Add("Slider", "x195 y436 w160 h24 Range1-" maxSteps " +AltSubmit ToolTip", curJumpStep)
+    ctrlDlg.Add("Text", "x25 y558 w70 h20 cWhite", "返回步驟號:")
+    lblJumpStep := ctrlDlg.Add("Text", "x95 y558 w100 h20 c0x00FFFF", "第 " curJumpStep " 步")
+    sldJumpStep := ctrlDlg.Add("Slider", "x195 y556 w160 h24 Range1-" maxSteps " Thick20 Tooltip AltSubmit", curJumpStep)
     
     sldTimeoutMode.OnEvent("Change", (ctrl, *) => (
         lblTimeoutMode.Value := GetModeText(ctrl.Value, sldJumpStep.Value)
@@ -994,8 +1340,15 @@ PromptEditColorDetect(step) {
         Sleep(60)
         
         try {
-            if PixelSearch(&fx, &fy, curX, curY, curX + curW, curY + curH, targetColor, tolVal) {
-                foundColor := true
+            colorList := StrSplit(targetColor, ",")
+            for cItem in colorList {
+                cTrim := Trim(cItem)
+                if (cTrim != "") {
+                    if PixelSearch(&fx, &fy, curX, curY, curX + curW, curY + curH, cTrim, tolVal) {
+                        foundColor := true
+                        break
+                    }
+                }
             }
         }
         
@@ -1028,15 +1381,36 @@ PromptEditColorDetect(step) {
     ))
     cbInvert.OnEvent("Click", (*) => TestColorDetect())
     
-    isUserTyping := false
+    isSliderUpdating := false
     
-    OnColorInputChanged(*) {
+    OnSliderPosChanged(params*) {
+        if isSliderUpdating
+            return
+        curX := sldX.Value
+        curY := sldY.Value
+        curW := Max(4, sldW.Value)
+        curH := Max(4, sldH.Value)
+        
+        lblX.Value := curX " px"
+        lblY.Value := curY " px"
+        lblW.Value := curW " px"
+        lblH.Value := curH " px"
+        
+        ShowBoxGui(boxGui, curX, curY, curW, curH)
+        TestColorDetect()
+    }
+    
+    sldX.OnEvent("Change", OnSliderPosChanged)
+    sldY.OnEvent("Change", OnSliderPosChanged)
+    sldW.OnEvent("Change", OnSliderPosChanged)
+    sldH.OnEvent("Change", OnSliderPosChanged)
+    
+    isUserTyping := false
+    OnColorInputChanged(params*) {
         if isUserTyping
             return
         val := Trim(editColor.Value)
-        if RegExMatch(val, "^(0x)?[0-9a-fA-F]{6}$") {
-            if !SubStr(val, 1, 2) == "0x"
-                val := "0x" . val
+        if (val != "") {
             targetColor := val
             SetSwatchColor(targetColor)
             TestColorDetect()
@@ -1044,35 +1418,17 @@ PromptEditColorDetect(step) {
     }
     editColor.OnEvent("Change", OnColorInputChanged)
     
-    OnCoordsEdited(*) {
-        if isUserTyping
-            return
-        try {
-            nx := Integer(editX.Value)
-            ny := Integer(editY.Value)
-            nw := Integer(editW.Value)
-            nh := Integer(editH.Value)
-            if (nw > 0 && nh > 0) {
-                curX := nx, curY := ny, curW := nw, curH := nh
-                ShowBoxGui(boxGui, curX, curY, curW, curH)
-                TestColorDetect()
-            }
-        }
-    }
-    editX.OnEvent("Change", OnCoordsEdited)
-    editY.OnEvent("Change", OnCoordsEdited)
-    editW.OnEvent("Change", OnCoordsEdited)
-    editH.OnEvent("Change", OnCoordsEdited)
-    
-    ; 輪詢檢測：滑鼠拖曳 boxGui 移動時自動更新座標並自動進行 1 次顏色檢測！
     UpdateBoxPosText() {
-        if GetBoxPos(boxGui, &gx, &gy, &gw, &gh) {
+        if (boxGui && WinExist("ahk_id " . boxGui.Hwnd)) {
+            WinGetPos(&gx, &gy, , , "ahk_id " . boxGui.Hwnd)
             if (gx != curX || gy != curY) {
                 curX := gx, curY := gy
-                isUserTyping := true
-                try editX.Value := curX
-                try editY.Value := curY
-                isUserTyping := false
+                isSliderUpdating := true
+                try {
+                    sldX.Value := curX, lblX.Value := curX " px"
+                    sldY.Value := curY, lblY.Value := curY " px"
+                }
+                isSliderUpdating := false
                 TestColorDetect()
             }
         }
@@ -1090,15 +1446,18 @@ PromptEditColorDetect(step) {
         SetSwatchColor(targetColor)
         TestColorDetect()
     }
+    btnSample.OnEvent("Click", (*) => ReSampleColor())
     
     OnRedrawRegionSelected(nx, ny, nw, nh) {
         curX := nx, curY := ny, curW := nw, curH := nh
-        isUserTyping := true
-        try editX.Value := curX
-        try editY.Value := curY
-        try editW.Value := curW
-        try editH.Value := curH
-        isUserTyping := false
+        isSliderUpdating := true
+        try {
+            sldX.Value := curX, lblX.Value := curX " px"
+            sldY.Value := curY, lblY.Value := curY " px"
+            sldW.Value := curW, lblW.Value := curW " px"
+            sldH.Value := curH, lblH.Value := curH " px"
+        }
+        isSliderUpdating := false
         
         ShowBoxGui(boxGui, curX, curY, curW, curH)
         ctrlDlg.Show()
@@ -1120,8 +1479,9 @@ PromptEditColorDetect(step) {
         try ctrlDlg.Hide()
         SelectScreenRegion(OnRedrawRegionSelected)
     }
+    btnRedraw.OnEvent("Click", (*) => RedrawBox())
     
-    CloseColorDialog() {
+    CloseColorDialog(params*) {
         global ActiveColorEditCtrlDlg
         ActiveBoxGuiHwnd := 0
         ActiveColorEditCtrlDlg := ""
@@ -1129,12 +1489,6 @@ PromptEditColorDetect(step) {
         try boxGui.Destroy()
         try ctrlDlg.Destroy()
     }
-    
-    btnSample := ctrlDlg.Add("Button", "x15 y476 w165 h34 Background0x282828", "🎯 採樣主色")
-    btnSample.OnEvent("Click", (*) => ReSampleColor())
-    
-    btnRedraw := ctrlDlg.Add("Button", "x200 y476 w165 h34 Background0x282828", "🖱 重新畫框")
-    btnRedraw.OnEvent("Click", (*) => RedrawBox())
     
     OnSaveColorEdit() {
         step.x := curX
@@ -1148,36 +1502,158 @@ PromptEditColorDetect(step) {
         step.invert := cbInvert.Value ? 1 : 0
         
         step.actionType := Integer(sldActionType.Value)
-        step.pressKey := Trim(editPressKey.Value)
-        step.holdMin := Integer(sldHoldMin.Value)
-        step.holdSec := Integer(sldHoldSec.Value)
+        step.pressKey := pressPicker.GetValue()
         
-        step.timeoutSec := Integer(sldTimeoutSec.Value)
-        step.timeoutKey := Trim(editTimeoutKey.Value)
+        totalHMs := TimeStepToMs(sldHoldTime.Value)
+        step.holdMin := totalHMs // 60000
+        step.holdSec := (totalHMs - step.holdMin * 60000) // 1000
+        
+        step.timeoutSec := TimeStepToMs(sldTimeoutSec.Value) // 1000
+        step.timeoutKey := timeoutPicker.GetValue()
         step.timeoutMode := Integer(sldTimeoutMode.Value)
         step.jumpStep := Integer(sldJumpStep.Value)
         RefreshMacroListView()
         CloseColorDialog()
     }
     
-    btnSave := ctrlDlg.Add("Button", "x15 y516 w350 h38 Background0x008800", "💾 儲存修改內容")
+    btnSave := ctrlDlg.Add("Button", "x15 y600 w350 h38 Background0x008800", "💾 儲存修改內容")
     btnSave.OnEvent("Click", (*) => OnSaveColorEdit())
-    ctrlDlg.OnEvent("Close", (*) => CloseColorDialog())
+    ctrlDlg.OnEvent("Close", CloseColorDialog)
     
     TestColorDetect()
     
     dlgX := Min(A_ScreenWidth - 395, curX + curW + 15)
-    dlgY := Max(30, Min(A_ScreenHeight - 590, curY))
+    dlgY := Max(30, Min(A_ScreenHeight - 690, curY))
     if (dlgX + 380 > A_ScreenWidth)
         dlgX := Max(10, curX - 390)
         
-    ctrlDlg.Show("X" dlgX " Y" dlgY " W380 H564")
+    ctrlDlg.Show("X" dlgX " Y" dlgY " W380 H650")
     
     SetTimer(UpdateBoxPosText, 200)
 }
 
 ; =================================================================
-; [動作 2：等待秒數設定拉桿]
+; [動作 2：按鍵發送 PromptEditKeyPress]
+; =================================================================
+PromptAddKeyPress() {
+    global MacroGroups, ActiveEditGroupIdx
+    if (ActiveEditGroupIdx < 1 || ActiveEditGroupIdx > MacroGroups.Length)
+        return
+        
+    PromptEditKeyPress({ type: "key_press", key: "Space", holdMs: 80, delayMs: 0, repeat: 1, isNew: true })
+}
+
+PromptEditKeyPress(step) {
+    global MacroGroups, ActiveEditGroupIdx, ActiveStepEditDlg, IsAlwaysOnTop, KeyCategories, TimeStepTable
+    isNew := step.HasOwnProp("isNew") && step.isNew
+    
+    if (ActiveStepEditDlg != "") {
+        try {
+            if WinExist("ahk_id " . ActiveStepEditDlg.Hwnd) {
+                WinActivate("ahk_id " . ActiveStepEditDlg.Hwnd)
+                return
+            }
+        }
+        ActiveStepEditDlg := ""
+    }
+    
+    ownerHwnd := GetMacroEditGuiHwnd()
+    ownerOpt := (ownerHwnd > 0) ? (" +Owner" . ownerHwnd) : ""
+    
+    dlg := Gui("-MaximizeBox" . ownerOpt . " +AlwaysOnTop", isNew ? "⌨️ 增加按鍵發送動作" : "⌨️ 編輯按鍵發送動作")
+    dlg.BackColor := "0x1A1A1A"
+    dlg.SetFont("s10 bold cWhite", "Microsoft JhengHei")
+    ActiveStepEditDlg := dlg
+    
+    curKey := step.HasOwnProp("key") ? step.key : "Space"
+    curHoldMs := step.HasOwnProp("holdMs") ? step.holdMs : 80
+    curDelayMs := step.HasOwnProp("delayMs") ? step.delayMs : 0
+    curRepeat := step.HasOwnProp("repeat") ? step.repeat : 1
+    
+    keyPicker := AttachKeyCategoryPicker(dlg, 14, curKey, false)
+    
+    ; 按住時間拉桿 (最久 10 分鐘，毫秒 ➔ 秒 ➔ 分 步進)
+    holdY := 84
+    initHoldStep := MsToTimeStep(curHoldMs, HoldTimeTable)
+    dlg.Add("Text", "x20 y" holdY " w90 h22 cWhite", "按住時間:")
+    lblHold := dlg.Add("Text", "x110 y" holdY " w200 h22 c0x00FFFF", FormatDurationText(curHoldMs))
+    sldHold := dlg.Add("Slider", "x20 y" (holdY + 22) " w325 h26 Range1-" HoldTimeTable.Length " Thick20 Tooltip AltSubmit", initHoldStep)
+    sldHold.OnEvent("Change", (ctrl, *) => (
+        lblHold.Value := FormatDurationText(TimeStepToMs(ctrl.Value, HoldTimeTable))
+    ))
+    
+    ; 完成後延遲拉桿 (最久 1 分鐘，毫秒 ➔ 秒 步進)
+    delayY := holdY + 52
+    initDelayStep := MsToTimeStep(curDelayMs, DelayTimeTable)
+    dlg.Add("Text", "x20 y" delayY " w90 h22 cWhite", "完成延遲:")
+    lblDelay := dlg.Add("Text", "x110 y" delayY " w200 h22 c0x00FFFF", FormatDurationText(curDelayMs))
+    sldDelay := dlg.Add("Slider", "x20 y" (delayY + 22) " w325 h26 Range1-" DelayTimeTable.Length " Thick20 Tooltip AltSubmit", initDelayStep)
+    sldDelay.OnEvent("Change", (ctrl, *) => (
+        lblDelay.Value := FormatDurationText(TimeStepToMs(ctrl.Value, DelayTimeTable))
+    ))
+    
+    ; 連續重複次數拉桿 (0 = 無限次)
+    repY := delayY + 52
+    dlg.Add("Text", "x20 y" repY " w110 h22 cWhite", "連續重複次數:")
+    lblRep := dlg.Add("Text", "x130 y" repY " w150 h22 c0x00FFFF", (curRepeat == 0) ? "無限次 (∞)" : (curRepeat . " 次"))
+    sldRep := dlg.Add("Slider", "x20 y" (repY + 22) " w325 h26 Range0-99 Thick20 Tooltip AltSubmit", curRepeat)
+    sldRep.OnEvent("Change", (ctrl, *) => (
+        lblRep.Value := (ctrl.Value == 0) ? "無限次 (∞)" : (ctrl.Value . " 次")
+    ))
+    
+    CloseKeyDlg(params*) {
+        global ActiveStepEditDlg
+        ActiveStepEditDlg := ""
+        try dlg.Destroy()
+    }
+    
+    btnY := repY + 58
+    if isNew {
+        btnConfirm := dlg.Add("Button", "x20 y" btnY " w325 h38 Background0x008800", "✅ 確認新增按鍵動作")
+        btnConfirm.OnEvent("Click", (*) => OnConfirmNewKey())
+        
+        OnConfirmNewKey(params*) {
+            kName := keyPicker.GetValue() != "" ? keyPicker.GetValue() : "Space"
+            hMs := TimeStepToMs(sldHold.Value, HoldTimeTable)
+            dMs := TimeStepToMs(sldDelay.Value, DelayTimeTable)
+            rCnt := Integer(sldRep.Value)
+            MacroGroups[ActiveEditGroupIdx].steps.Push({ type: "key_press", key: kName, holdMs: hMs, delayMs: dMs, repeat: rCnt })
+            RefreshMacroListView()
+            CloseKeyDlg()
+        }
+    } else {
+        btnSaveK := dlg.Add("Button", "x20 y" btnY " w155 h38 Background0x006600", "💾 儲存修改")
+        btnSaveK.OnEvent("Click", (*) => OnSaveKeyEdit())
+        
+        OnSaveKeyEdit(params*) {
+            step.key := keyPicker.GetValue() != "" ? keyPicker.GetValue() : "Space"
+            step.holdMs := TimeStepToMs(sldHold.Value, HoldTimeTable)
+            step.delayMs := TimeStepToMs(sldDelay.Value, DelayTimeTable)
+            step.repeat := Integer(sldRep.Value)
+            RefreshMacroListView()
+            CloseKeyDlg()
+        }
+        
+        btnAddK := dlg.Add("Button", "x185 y" btnY " w160 h38 Background0x005588", "➕ 另存新步驟")
+        btnAddK.OnEvent("Click", (*) => OnSaveNewStep())
+        
+        OnSaveNewStep(params*) {
+            kName := keyPicker.GetValue() != "" ? keyPicker.GetValue() : "Space"
+            hMs := TimeStepToMs(sldHold.Value, HoldTimeTable)
+            dMs := TimeStepToMs(sldDelay.Value, DelayTimeTable)
+            rCnt := Integer(sldRep.Value)
+            MacroGroups[ActiveEditGroupIdx].steps.Push({ type: "key_press", key: kName, holdMs: hMs, delayMs: dMs, repeat: rCnt })
+            RefreshMacroListView()
+            CloseKeyDlg()
+        }
+    }
+    dlg.OnEvent("Close", (*) => CloseKeyDlg())
+    
+    dlg.Show("w365 h" (btnY + 52))
+}
+
+; =================================================================
+; [動作 3：純等待 PromptEditWait]
 ; =================================================================
 PromptAddWait() {
     global MacroGroups, ActiveEditGroupIdx
@@ -1188,7 +1664,7 @@ PromptAddWait() {
 }
 
 PromptEditWait(step) {
-    global MacroGroups, ActiveEditGroupIdx, ActiveStepEditDlg, IsAlwaysOnTop
+    global MacroGroups, ActiveEditGroupIdx, ActiveStepEditDlg, IsAlwaysOnTop, TimeStepTable
     isNew := step.HasOwnProp("isNew") && step.isNew
     
     if (ActiveStepEditDlg != "") {
@@ -1209,15 +1685,15 @@ PromptEditWait(step) {
     dlg.SetFont("s10 bold cWhite", "Microsoft JhengHei")
     ActiveStepEditDlg := dlg
     
-    curWaitVal := Round(step.waitMs / 100)
-    dlg.Add("Text", "x20 y20 w120 h25 cWhite", "等待秒數時間:")
-    lblWait := dlg.Add("Text", "x140 y20 w140 h25 c0x00FFFF", Format("{:.1f} 秒", curWaitVal / 10))
-    sldWait := dlg.Add("Slider", "x20 y50 w260 h30 Range1-600 +AltSubmit ToolTip", curWaitVal)
+    initWaitStep := MsToTimeStep(step.waitMs)
+    dlg.Add("Text", "x20 y20 w90 h25 cWhite", "等待時間:")
+    lblWait := dlg.Add("Text", "x110 y20 w170 h25 c0x00FFFF", FormatDurationText(step.waitMs))
+    sldWait := dlg.Add("Slider", "x20 y50 w260 h30 Range1-" TimeStepTable.Length " Thick20 Tooltip AltSubmit", initWaitStep)
     sldWait.OnEvent("Change", (ctrl, *) => (
-        lblWait.Value := Format("{:.1f} 秒", ctrl.Value / 10)
+        lblWait.Value := FormatDurationText(TimeStepToMs(ctrl.Value))
     ))
     
-    CloseWaitDlg() {
+    CloseWaitDlg(params*) {
         global ActiveStepEditDlg
         ActiveStepEditDlg := ""
         try dlg.Destroy()
@@ -1225,18 +1701,18 @@ PromptEditWait(step) {
     
     btnConfirm := dlg.Add("Button", "x20 y95 w260 h35 Background0x008800", isNew ? "確認新增等待" : "確認儲存等待修改")
     btnConfirm.OnEvent("Click", (*) => (
-        step.waitMs := Integer(sldWait.Value * 100),
+        step.waitMs := TimeStepToMs(sldWait.Value),
         isNew ? MacroGroups[ActiveEditGroupIdx].steps.Push(step) : 0,
         RefreshMacroListView(),
         CloseWaitDlg()
     ))
-    dlg.OnEvent("Close", (*) => CloseWaitDlg())
+    dlg.OnEvent("Close", CloseWaitDlg)
     
     dlg.Show("w300 h145")
 }
     
 ; =================================================================
-; [動作 3：步驟內循環轉向控制 (Loop Goto Step)]
+; [動作 4：步驟內循環轉向控制 (Loop Goto Step)]
 ; =================================================================
 PromptAddLoopGoto() {
     global MacroGroups, ActiveEditGroupIdx
@@ -1270,25 +1746,25 @@ PromptEditLoopGoto(step) {
     
     maxSteps := (ActiveEditGroupIdx <= MacroGroups.Length) ? Max(1, MacroGroups[ActiveEditGroupIdx].steps.Length) : 1
     curTarget := step.HasOwnProp("targetStep") ? Min(maxSteps, Max(1, step.targetStep)) : 1
-    curLoops := step.HasOwnProp("maxLoops") ? Max(1, step.maxLoops) : 5
+    curLoops := step.HasOwnProp("maxLoops") ? step.maxLoops : 5
     
     dlg.Add("Text", "x20 y18 w140 h25 cWhite", "返回目標步驟號:")
     lblTarget := dlg.Add("Text", "x160 y18 w140 h25 c0x00FFFF", "第 " curTarget " 步")
-    sldTarget := dlg.Add("Slider", "x20 y45 w280 h30 Range1-" maxSteps " +AltSubmit ToolTip", curTarget)
+    sldTarget := dlg.Add("Slider", "x20 y45 w280 h30 Range1-" maxSteps " Thick20 Tooltip AltSubmit", curTarget)
     sldTarget.OnEvent("Change", (ctrl, *) => (
         lblTarget.Value := "第 " ctrl.Value " 步"
     ))
     
     dlg.Add("Text", "x20 y85 w140 h25 cWhite", "重複返回循環次數:")
-    lblLoops := dlg.Add("Text", "x160 y85 w140 h25 c0x00FFFF", curLoops " 次")
-    sldLoops := dlg.Add("Slider", "x20 y112 w280 h30 Range1-999 +AltSubmit ToolTip", curLoops)
+    lblLoops := dlg.Add("Text", "x160 y85 w140 h25 c0x00FFFF", (curLoops == 0) ? "無限次 (∞)" : (curLoops . " 次"))
+    sldLoops := dlg.Add("Slider", "x20 y112 w280 h30 Range0-999 Thick20 Tooltip AltSubmit", curLoops)
     sldLoops.OnEvent("Change", (ctrl, *) => (
-        lblLoops.Value := ctrl.Value " 次"
+        lblLoops.Value := (ctrl.Value == 0) ? "無限次 (∞)" : (ctrl.Value . " 次")
     ))
     
     dlg.Add("Text", "x20 y150 w280 h38 c0x888888", "說明: 執行到此步驟時會跳轉回指定步驟，累積指定次數後即會自動通過推進至下一步。")
     
-    CloseLoopGotoDlg() {
+    CloseLoopGotoDlg(params*) {
         global ActiveStepEditDlg
         ActiveStepEditDlg := ""
         try dlg.Destroy()
@@ -1302,11 +1778,14 @@ PromptEditLoopGoto(step) {
         RefreshMacroListView(),
         CloseLoopGotoDlg()
     ))
-    dlg.OnEvent("Close", (*) => CloseLoopGotoDlg())
+    dlg.OnEvent("Close", CloseLoopGotoDlg)
     
     dlg.Show("w320 h248")
 }
 
+; =================================================================
+; [設定檔 INI 讀取與儲存]
+; =================================================================
 SaveMacroConfig(targetPath := "") {
     global MacroGroups, ConfigFile, IsAlwaysOnTop
     saveFile := (targetPath != "") ? targetPath : ConfigFile
@@ -1346,6 +1825,11 @@ SaveMacroConfig(targetPath := "") {
                 IniWrite(step.HasOwnProp("timeoutKey") ? step.timeoutKey : "", saveFile, sSec, "TimeoutKey")
                 IniWrite(step.HasOwnProp("timeoutMode") ? step.timeoutMode : 1, saveFile, sSec, "TimeoutMode")
                 IniWrite(step.HasOwnProp("jumpStep") ? step.jumpStep : 1, saveFile, sSec, "JumpStep")
+            } else if (step.type == "key_press") {
+                IniWrite(step.HasOwnProp("key") ? step.key : "Space", saveFile, sSec, "Key")
+                IniWrite(step.HasOwnProp("holdMs") ? step.holdMs : 80, saveFile, sSec, "HoldMs")
+                IniWrite(step.HasOwnProp("delayMs") ? step.delayMs : 0, saveFile, sSec, "DelayMs")
+                IniWrite(step.HasOwnProp("repeat") ? step.repeat : 1, saveFile, sSec, "Repeat")
             } else if (step.type == "wait") {
                 IniWrite(step.waitMs, saveFile, sSec, "WaitMs")
             } else if (step.type == "loop_goto") {
@@ -1403,6 +1887,14 @@ LoadMacroConfig(targetPath := "") {
                         timeoutKey: IniRead(loadFile, sSec, "TimeoutKey", ""),
                         timeoutMode: Integer(IniRead(loadFile, sSec, "TimeoutMode", "1")),
                         jumpStep: Integer(IniRead(loadFile, sSec, "JumpStep", "1"))
+                    })
+                } else if (sType == "key_press") {
+                    steps.Push({
+                        type: "key_press",
+                        key: IniRead(loadFile, sSec, "Key", "Space"),
+                        holdMs: Integer(IniRead(loadFile, sSec, "HoldMs", "80")),
+                        delayMs: Integer(IniRead(loadFile, sSec, "DelayMs", "0")),
+                        repeat: Integer(IniRead(loadFile, sSec, "Repeat", "1"))
                     })
                 } else if (sType == "wait") {
                     steps.Push({
@@ -1538,16 +2030,17 @@ RunGroupMacroLoop(groupIdx) {
     grp := MacroGroups[groupIdx]
     curLoop := 1
     totalLoops := grp.loopCount
+    totalLoopsStr := (totalLoops == 0) ? "∞" : totalLoops
     steps := grp.steps
     loopCounters := Map()
     
-    while (curLoop <= totalLoops && !StopMacroRequested && RunningGroupIdx == groupIdx) {
+    while ((totalLoops == 0 || curLoop <= totalLoops) && !StopMacroRequested && RunningGroupIdx == groupIdx) {
         sIdx := 1
         while (sIdx <= steps.Length && !StopMacroRequested && RunningGroupIdx == groupIdx) {
             step := steps[sIdx]
             
             stepPct := (sIdx / steps.Length) * 100
-            totalPct := (curLoop / totalLoops) * 100
+            totalPct := (totalLoops == 0) ? 100 : ((curLoop / totalLoops) * 100)
             
             if (step.type == "color_detect") {
                 tolVal := step.HasOwnProp("tolerance") ? step.tolerance : 20
@@ -1565,9 +2058,9 @@ RunGroupMacroLoop(groupIdx) {
                 jumpStep := step.HasOwnProp("jumpStep") ? step.jumpStep : 1
                 
                 invText := isInverted ? " (反向:未發現才點擊)" : ""
-                toText := (timeoutSec > 0) ? Format(" [逾時:{}s]", timeoutSec) : ""
+                toText := (timeoutSec > 0) ? Format(" [逾時:{}]", FormatDurationText(timeoutSec * 1000)) : ""
                 statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 偵測顏色 {}{}{}...", 
-                    grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, step.color, invText, toText)
+                    grp.icon, grp.name, curLoop, totalLoopsStr, sIdx, steps.Length, step.color, invText, toText)
                 RenderProgressBarBitmap(stepPct, totalPct, statusText)
                 
                 foundColor := false
@@ -1580,8 +2073,15 @@ RunGroupMacroLoop(groupIdx) {
                         
                     foundColor := false
                     try {
-                        if PixelSearch(&foundX, &foundY, step.x, step.y, step.x + step.w, step.y + step.h, step.color, tolVal) {
-                            foundColor := true
+                        colorList := StrSplit(step.color, ",")
+                        for cItem in colorList {
+                            cTrim := Trim(cItem)
+                            if (cTrim != "") {
+                                if PixelSearch(&foundX, &foundY, step.x, step.y, step.x + step.w, step.y + step.h, cTrim, tolVal) {
+                                    foundColor := true
+                                    break
+                                }
+                            }
                         }
                     }
                     
@@ -1619,7 +2119,7 @@ RunGroupMacroLoop(groupIdx) {
                     
                     ; 若已超過逾時時間且已設定逾時 > 0
                     if (timeoutMs > 0 && (A_TickCount - startTime >= timeoutMs)) {
-                        statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: ⚠️ 步驟逾時！執行處置...", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length)
+                        statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: ⚠️ 步驟逾時！執行處置...", grp.icon, grp.name, curLoop, totalLoopsStr, sIdx, steps.Length)
                         RenderProgressBarBitmap(stepPct, totalPct, statusText)
                         
                         ; 1. 逾時發送按鍵 (若有)
@@ -1655,37 +2155,56 @@ RunGroupMacroLoop(groupIdx) {
                 }
                 
             } else if (step.type == "key_press") {
-                statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 按鍵 '{}' (按住 {:.1f}s)", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, step.key, step.holdMs/1000)
-                RenderProgressBarBitmap(stepPct, totalPct, statusText)
+                keyName := step.HasOwnProp("key") ? step.key : "Space"
+                holdMs := step.HasOwnProp("holdMs") ? step.holdMs : 80
+                delayMs := step.HasOwnProp("delayMs") ? step.delayMs : 0
+                repeatCount := step.HasOwnProp("repeat") ? step.repeat : 1
+                isInfiniteRep := (repeatCount == 0)
                 
-                Send("{" step.key " down}")
-                SleepInterruptible(step.holdMs)
-                Send("{" step.key " up}")
-                
-                if (step.delayMs > 0) {
-                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 延遲 {:.1f}s...", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, step.delayMs/1000)
+                repIdx := 1
+                while (!StopMacroRequested && RunningGroupIdx == groupIdx && (isInfiniteRep || repIdx <= repeatCount)) {
+                    repText := isInfiniteRep ? Format(" ({}/∞)", repIdx) : ((repeatCount > 1) ? Format(" ({}/{})", repIdx, repeatCount) : "")
+                    holdInfo := (holdMs > 0) ? (" (按住 " . FormatDurationText(holdMs) . ")") : ""
+                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 按鍵 '{}'{}{}", grp.icon, grp.name, curLoop, totalLoopsStr, sIdx, steps.Length, keyName, holdInfo, repText)
                     RenderProgressBarBitmap(stepPct, totalPct, statusText)
-                    SleepInterruptible(step.delayMs)
+                    
+                    Send("{" keyName " down}")
+                    if (holdMs > 0)
+                        SleepInterruptible(holdMs)
+                    Send("{" keyName " up}")
+                    
+                    if (delayMs > 0) {
+                        statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 延遲 {}...", grp.icon, grp.name, curLoop, totalLoopsStr, sIdx, steps.Length, FormatDurationText(delayMs))
+                        RenderProgressBarBitmap(stepPct, totalPct, statusText)
+                        SleepInterruptible(delayMs)
+                    }
+                    repIdx++
                 }
                 
             } else if (step.type == "wait") {
-                statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 等待 {:.1f}s...", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, step.waitMs/1000)
+                statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 等待 {}...", grp.icon, grp.name, curLoop, totalLoopsStr, sIdx, steps.Length, FormatDurationText(step.waitMs))
                 RenderProgressBarBitmap(stepPct, totalPct, statusText)
                 SleepInterruptible(step.waitMs)
             } else if (step.type == "loop_goto") {
                 targetS := step.HasOwnProp("targetStep") ? Max(1, Min(steps.Length, step.targetStep)) : 1
-                maxL := step.HasOwnProp("maxLoops") ? Max(1, step.maxLoops) : 1
+                maxL := step.HasOwnProp("maxLoops") ? step.maxLoops : 1
                 
                 currRunCount := loopCounters.Has(sIdx) ? loopCounters[sIdx] : 0
-                if (currRunCount < maxL) {
+                if (maxL == 0) {
                     loopCounters[sIdx] := currRunCount + 1
-                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 🔁 轉向跳轉至第 {} 步 ({}/{})", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, targetS, currRunCount + 1, maxL)
+                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 🔁 轉向跳轉至第 {} 步 ({}/∞)", grp.icon, grp.name, curLoop, totalLoopsStr, sIdx, steps.Length, targetS, currRunCount + 1)
+                    RenderProgressBarBitmap(stepPct, totalPct, statusText)
+                    Sleep(150)
+                    sIdx := targetS - 1
+                } else if (currRunCount < maxL) {
+                    loopCounters[sIdx] := currRunCount + 1
+                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 🔁 轉向跳轉至第 {} 步 ({}/{})", grp.icon, grp.name, curLoop, totalLoopsStr, sIdx, steps.Length, targetS, currRunCount + 1, maxL)
                     RenderProgressBarBitmap(stepPct, totalPct, statusText)
                     Sleep(150)
                     sIdx := targetS - 1 ; 跳轉至目標步驟 (迴圈末會 sIdx++)
                 } else {
                     loopCounters[sIdx] := 0 ; 滿次解鎖並重置計數器，推進至下一步
-                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 🔁 轉向次數已滿 ({}/{})，推進下一步", grp.icon, grp.name, curLoop, totalLoops, sIdx, steps.Length, maxL, maxL)
+                    statusText := Format("{} {} | Loop [{}/{}] Step [{}/{}]: 🔁 轉向次數已滿 ({}/{})，推進下一步", grp.icon, grp.name, curLoop, totalLoopsStr, sIdx, steps.Length, maxL, maxL)
                     RenderProgressBarBitmap(stepPct, totalPct, statusText)
                     Sleep(150)
                 }
