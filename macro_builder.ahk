@@ -45,6 +45,25 @@ global MacroGroups := []         ; 巨集群組陣列
 global RunningGroupIdx := 0      ; 當前執行中群組索引 (0 為無執行)
 global ActiveEditGroupIdx := 1   ; 編輯器中當前選取的群組索引
 global StopMacroRequested := false
+global LastExternalActiveHwnd := 0 ; 記錄外部目標視窗 (遊戲視窗) HWND
+
+TrackActiveWindow() {
+    global LastExternalActiveHwnd
+    thisPID := ProcessExist()
+    try {
+        hwnd := WinGetID("A")
+        if (hwnd) {
+            pid := WinGetPID("ahk_id " . hwnd)
+            if (pid != thisPID) {
+                cls := WinGetClass("ahk_id " . hwnd)
+                if (cls != "Shell_TrayWnd" && cls != "Shell_SecondaryTrayWnd" && cls != "Progman" && cls != "WorkerW") {
+                    LastExternalActiveHwnd := hwnd
+                }
+            }
+        }
+    }
+}
+SetTimer(TrackActiveWindow, 50)
 
 global ConfigFile := A_ScriptDir . "\macro_config.ini"
 
@@ -256,6 +275,23 @@ OnWM_SETCURSOR(wParam, lParam, msg, hwnd) {
     }
 }
 OnMessage(0x0020, OnWM_SETCURSOR)
+
+; =================================================================
+; [WM_MOUSEACTIVATE 攔截點擊啟用事件，全面防止懸浮列搶奪遊戲焦點]
+; =================================================================
+OnWM_MOUSEACTIVATE(wParam, lParam, msg, hwnd) {
+    global MyGui
+    if (MyGui != "") {
+        if (hwnd == MyGui.Hwnd || wParam == MyGui.Hwnd)
+            return 3 ; MA_NOACTIVATE (不啟用視窗，但允許點擊訊息傳遞至控制項)
+        try {
+            ctrl := GuiCtrlFromHwnd(hwnd)
+            if (ctrl && ctrl.Gui.Hwnd == MyGui.Hwnd)
+                return 3
+        }
+    }
+}
+OnMessage(0x0021, OnWM_MOUSEACTIVATE)
 
 global ActiveBoxGuiDragCallback := ""
 
@@ -537,7 +573,7 @@ BuildMainGui() {
     }
     
     IsAlwaysOnTop := true
-    MyGui := Gui("-Caption -Border +ToolWindow +AlwaysOnTop")
+    MyGui := Gui("-Caption -Border +ToolWindow +AlwaysOnTop +E0x08000000")
     MyGui.BackColor := "010101"
     MyGui.SetFont("s13 bold cWhite", "Segoe UI Emoji")
     
@@ -555,15 +591,11 @@ BuildMainGui() {
     
     for idx, grp in MacroGroups {
         isVis := !grp.HasOwnProp("visible") || grp.visible
-        if (isVis) {
-            btnText := (RunningGroupIdx == idx) ? "⏹" : grp.icon
-            btn := MyGui.Add("Text", "x" currX " y3 w32 h28 Center +0x200 Background010101", btnText)
-            
-            btn.OnEvent("Click", MakeGroupClickFn(idx))
-            GroupBtns.Push({ btn: btn, grpIdx: idx })
-            
+        btn := MyGui.Add("Text", "x" currX " y3 w32 h28 Center +0x200 Background010101 " . (isVis ? "" : "+Hidden"), grp.icon)
+        btn.OnEvent("Click", MakeGroupClickFn(idx))
+        GroupBtns.Push({ btn: btn, grpIdx: idx })
+        if (isVis)
             currX += 35
-        }
     }
     
     ; 3. 右側：⏏ 離開按鈕
@@ -572,17 +604,19 @@ BuildMainGui() {
     
     currX += 35
     
-    ; 4. GDI 進度條 (位於所有按鈕右側)
-    ProgressPic := MyGui.Add("Picture", "x" currX " y3 w" . ProgressBarWidth . " h28 -Border +Hidden", "")
+    ; 4. GDI 進度條 (預設位置在圖示右側)
+    ProgressPic := MyGui.Add("Picture", "x38 y3 w" . ProgressBarWidth . " h28 -Border +Hidden", "")
     try DllCall("uxtheme\SetWindowTheme", "Ptr", ProgressPic.Hwnd, "Str", "", "Str", "")
     
     ; 右鍵選單支援
     MyGui.OnEvent("ContextMenu", (*) => ShowContextMenu())
     
     ; 顯示無邊框懸浮 UI
-    totalW := (RunningGroupIdx > 0) ? (currX + ProgressBarWidth + 5) : currX
+    totalW := (RunningGroupIdx > 0) ? (38 + ProgressBarWidth + 5) : currX
     MyGui.Show("X" GuiX " Y" GuiY " W" totalW " H" GuiH " NoActivate")
     WinSetTransparent(GuiOpacity, MyGui.Hwnd)
+    
+    UpdateMainGuiButtons()
 }
 
 ShowContextMenu() {
@@ -598,11 +632,71 @@ ShowContextMenu() {
 }
 
 UpdateMainGuiButtons() {
-    global GroupBtns, MacroGroups, RunningGroupIdx
-    for item in GroupBtns {
-        idx := item.grpIdx
-        if (idx <= MacroGroups.Length) {
-            item.btn.Value := (RunningGroupIdx == idx) ? "⏹" : MacroGroups[idx].icon
+    global GroupBtns, MacroGroups, RunningGroupIdx, GearBtn, ExitBtn, ProgressPic, MyGui, GuiX, GuiY, GuiH, ProgressBarWidth
+    
+    if (RunningGroupIdx > 0) {
+        ; 執行中：只留下該行程的圖示與進度條 (隱藏設定、離開與其他群組按鈕)
+        if (GearBtn)
+            GearBtn.Visible := false
+        if (ExitBtn)
+            ExitBtn.Visible := false
+            
+        for item in GroupBtns {
+            idx := item.grpIdx
+            if (idx == RunningGroupIdx && idx <= MacroGroups.Length) {
+                item.btn.Value := MacroGroups[idx].icon
+                item.btn.Visible := true
+                item.btn.Move(3, 3, 32, 28)
+            } else {
+                item.btn.Visible := false
+            }
+        }
+        
+        if (ProgressPic) {
+            ProgressPic.Move(38, 3, ProgressBarWidth, 28)
+            ProgressPic.Visible := true
+        }
+        
+        totalW := 38 + ProgressBarWidth + 5
+        if (MyGui != "" && WinExist("ahk_id " . MyGui.Hwnd)) {
+            MyGui.Show("X" GuiX " Y" GuiY " W" totalW " H" GuiH " NoActivate")
+        }
+    } else {
+        ; 停止/待機中：恢復顯示 ⚙️ 設定按鈕、所有已設定顯示的群組圖示與 ⏏ 離開按鈕，隱藏進度條
+        if (GearBtn) {
+            GearBtn.Move(3, 3, 32, 28)
+            GearBtn.Visible := true
+        }
+        
+        currX := 38
+        for item in GroupBtns {
+            idx := item.grpIdx
+            if (idx <= MacroGroups.Length) {
+                grp := MacroGroups[idx]
+                isVis := !grp.HasOwnProp("visible") || grp.visible
+                item.btn.Value := grp.icon
+                item.btn.Visible := isVis
+                if (isVis) {
+                    item.btn.Move(currX, 3, 32, 28)
+                    currX += 35
+                }
+            }
+        }
+        
+        if (ExitBtn) {
+            ExitBtn.Move(currX, 3, 32, 28)
+            ExitBtn.Visible := true
+            currX += 35
+        }
+        
+        if (ProgressPic)
+            ProgressPic.Visible := false
+            
+        if (MyGui != "") {
+            try {
+                if WinExist("ahk_id " . MyGui.Hwnd)
+                    MyGui.Show("X" GuiX " Y" GuiY " W" currX " H" GuiH " NoActivate")
+            }
         }
     }
 }
@@ -628,8 +722,9 @@ RenderProgressBarBitmap(loopPercent, totalPercent, text, w := 500, h := 28) {
     DllCall("user32\FillRect", "Ptr", hdcMem, "Ptr", rectBg, "Ptr", hBrushBg)
     DllCall("gdi32\DeleteObject", "Ptr", hBrushBg)
     
-    ; 2. 總進度黃條 (0x00FFFF)
-    if (totalPercent > 0) {
+    ; 2. 總進度黃條 (0x00FFFF) - 僅在有限循環 (totalPercent > 0) 時繪製頂部 5px
+    hasTotalBar := (totalPercent > 0)
+    if (hasTotalBar) {
         totalW := Integer(w * Min(1.0, Max(0.0, totalPercent / 100)))
         if (totalW > 0) {
             hBrushTotal := DllCall("gdi32\CreateSolidBrush", "UInt", 0x00FFFF, "Ptr")
@@ -642,13 +737,17 @@ RenderProgressBarBitmap(loopPercent, totalPercent, text, w := 500, h := 28) {
     }
     
     ; 3. 當前步驟水藍條 (0xFFC080)
+    ; 無限循環時 (hasTotalBar == false) 高度填滿 y=0 到 y=h (原黃色佔用的頂部空間也由水藍色填滿)
+    ; 有限循環時 (hasTotalBar == true) 水藍條高度為 y=5 到 y=h
     if (loopPercent > 0) {
         loopW := Integer(w * Min(1.0, Max(0.0, loopPercent / 100)))
         if (loopW > 0) {
             hBrushLoop := DllCall("gdi32\CreateSolidBrush", "UInt", 0xFFC080, "Ptr")
             rectLoop := Buffer(16, 0)
-            NumPut("int", 0, rectLoop, 0), NumPut("int", (totalPercent > 0 ? 5 : 0), rectLoop, 4)
-            NumPut("int", loopW, rectLoop, 8), NumPut("int", h, rectLoop, 12)
+            NumPut("int", 0, rectLoop, 0)
+            NumPut("int", (hasTotalBar ? 5 : 0), rectLoop, 4)
+            NumPut("int", loopW, rectLoop, 8)
+            NumPut("int", h, rectLoop, 12)
             DllCall("user32\FillRect", "Ptr", hdcMem, "Ptr", rectLoop, "Ptr", hBrushLoop)
             DllCall("gdi32\DeleteObject", "Ptr", hBrushLoop)
         }
@@ -803,7 +902,11 @@ ToggleMacroEditGui() {
     btnExport.OnEvent("Click", (*) => ExportMacroConfig())
     
     btnSave := MacroEditGui.Add("Button", "x515 y" botY " w80 h35 Background0x008800", "💾 儲存")
-    btnSave.OnEvent("Click", (*) => (SaveMacroConfig(), ToggleMacroEditGui()))
+    btnSave.OnEvent("Click", (*) => (
+        (LoopCountSlider && ActiveEditGroupIdx <= MacroGroups.Length) ? (MacroGroups[ActiveEditGroupIdx].loopCount := LoopCountSlider.Value) : 0,
+        SaveMacroConfig(),
+        ToggleMacroEditGui()
+    ))
     
     winH := botY + 48
     MacroEditGui.Show("w610 h" winH)
@@ -824,6 +927,9 @@ RebuildMacroEditGui() {
 SwitchActiveGroup(idx) {
     global ActiveEditGroupIdx, MacroGroups, DDLGroupSelect, LoopCountSlider, LoopCountLabel
     if (idx > 0 && idx <= MacroGroups.Length) {
+        if (LoopCountSlider && ActiveEditGroupIdx <= MacroGroups.Length) {
+            MacroGroups[ActiveEditGroupIdx].loopCount := LoopCountSlider.Value
+        }
         ActiveEditGroupIdx := idx
         
         if (DDLGroupSelect) {
@@ -2164,6 +2270,68 @@ ExportMacroConfig() {
 }
 
 ; =================================================================
+; [焦點管理：自動確保遊戲/目標視窗處於啟用狀態]
+; =================================================================
+ActivateTargetGameWindow() {
+    global LastExternalActiveHwnd
+    thisPID := ProcessExist()
+    
+    ; 1. 若有記錄到最近啟用的外部目標視窗 (遊戲視窗)，直接優先強制啟用
+    if (LastExternalActiveHwnd) {
+        try {
+            if WinExist("ahk_id " . LastExternalActiveHwnd) {
+                WinActivate("ahk_id " . LastExternalActiveHwnd)
+                return
+            }
+        }
+    }
+    
+    ; 2. 若當前焦點本身就是外部視窗，無需切換
+    try {
+        activeHwnd := WinGetID("A")
+        activePID := WinGetPID("ahk_id " . activeHwnd)
+        if (activePID != thisPID) {
+            LastExternalActiveHwnd := activeHwnd
+            return
+        }
+    }
+    
+    ; 3. 若當前焦點在 AHK 內部，由 Z 軸搜尋最上層非 AHK 的遊戲/應用程式視窗並啟用焦點
+    winList := WinGetList()
+    for hwnd in winList {
+        try {
+            pid := WinGetPID("ahk_id " . hwnd)
+            if (pid == thisPID)
+                continue
+            
+            style := WinGetStyle("ahk_id " . hwnd)
+            exStyle := WinGetExStyle("ahk_id " . hwnd)
+            title := WinGetTitle("ahk_id " . hwnd)
+            cls := WinGetClass("ahk_id " . hwnd)
+            
+            ; 排除桌面、工作列與系統殼層視窗
+            if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd" || cls == "Windows.UI.Core.CoreWindow")
+                continue
+            ; 必須為可見視窗 (WS_VISIBLE = 0x10000000)
+            if !(style & 0x10000000)
+                continue
+            ; 排除已最小化視窗 (WS_MINIMIZE = 0x20000000)
+            if (style & 0x20000000)
+                continue
+            ; 排除無標題之工具視窗
+            if ((exStyle & 0x80) && title == "")
+                continue
+            if (title == "")
+                continue
+                
+            WinActivate("ahk_id " . hwnd)
+            LastExternalActiveHwnd := hwnd
+            break
+        }
+    }
+}
+
+; =================================================================
 ; [多群組獨立巨集執行引擎 (Per-Group Macro Runner)]
 ; =================================================================
 ToggleGroupExecution(groupIdx) {
@@ -2176,7 +2344,7 @@ ToggleGroupExecution(groupIdx) {
 }
 
 StartGroupMacro(groupIdx) {
-    global RunningGroupIdx, StopMacroRequested, MacroGroups, ProgressPic, MyGui, GuiX, GuiY, GuiH, GuiOpacity, ProgressBarWidth
+    global RunningGroupIdx, StopMacroRequested, MacroGroups
     
     if (groupIdx < 1 || groupIdx > MacroGroups.Length)
         return
@@ -2197,33 +2365,16 @@ StartGroupMacro(groupIdx) {
     
     UpdateMainGuiButtons()
     
-    currX := 38 + (GetVisibleGroupCount() * 35) + 35
-    totalW := currX + ProgressBarWidth + 5
-    
-    ProgressPic.Visible := true
-    MyGui.Show("X" GuiX " Y" GuiY " W" totalW " H" GuiH " NoActivate")
-    
+    ActivateTargetGameWindow()
     SetTimer(() => RunGroupMacroLoop(groupIdx), -10)
 }
 
 StopMacro() {
-    global RunningGroupIdx, StopMacroRequested, ProgressPic, MyGui, GuiX, GuiY, GuiH, GuiOpacity, MacroGroups
+    global RunningGroupIdx, StopMacroRequested
     RunningGroupIdx := 0
     StopMacroRequested := true
     
     UpdateMainGuiButtons()
-    
-    if (ProgressPic)
-        ProgressPic.Visible := false
-        
-    if (MyGui != "") {
-        try {
-            if WinExist("ahk_id " . MyGui.Hwnd) {
-                currX := 38 + (GetVisibleGroupCount() * 35) + 35
-                MyGui.Show("X" GuiX " Y" GuiY " W" currX " H" GuiH " NoActivate")
-            }
-        }
-    }
 }
 
 RunGroupMacroLoop(groupIdx) {
@@ -2231,23 +2382,25 @@ RunGroupMacroLoop(groupIdx) {
     CoordMode("Pixel", "Screen")
     CoordMode("Mouse", "Screen")
     
+    ActivateTargetGameWindow()
+    
     if (groupIdx < 1 || groupIdx > MacroGroups.Length)
         return
         
     grp := MacroGroups[groupIdx]
     curLoop := 1
-    totalLoops := grp.loopCount
-    totalLoopsStr := (totalLoops == 0) ? "∞" : totalLoops
+    totalLoops := grp.HasOwnProp("loopCount") ? Integer(grp.loopCount) : 0
+    totalLoopsStr := (totalLoops <= 0) ? "∞" : totalLoops
     steps := grp.steps
     loopCounters := Map()
     
-    while ((totalLoops == 0 || curLoop <= totalLoops) && !StopMacroRequested && RunningGroupIdx == groupIdx) {
+    while ((totalLoops <= 0 || curLoop <= totalLoops) && !StopMacroRequested && RunningGroupIdx == groupIdx) {
         sIdx := 1
         while (sIdx <= steps.Length && !StopMacroRequested && RunningGroupIdx == groupIdx) {
             step := steps[sIdx]
             
             stepPct := (sIdx / steps.Length) * 100
-            totalPct := (totalLoops == 0) ? 100 : ((curLoop / totalLoops) * 100)
+            totalPct := (totalLoops <= 0) ? 0 : (((curLoop - 1) + (sIdx / steps.Length)) / totalLoops * 100)
             
             if (step.type == "color_detect") {
                 tolVal := step.HasOwnProp("tolerance") ? step.tolerance : 20
